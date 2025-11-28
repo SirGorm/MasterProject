@@ -27,24 +27,25 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.worker = worker
         self.kinect_worker = kinect_worker
         self.camera_window = None
-
+        self.window_length_seconds = 20
+        
         # Define channel names and sampling frequencies
         self.channel_names = ["EMG", "ECG", "Temperature", "EDA", "PPG", "IMU"]
         self.FS = {"emg": 2000, "ecg": 500, "temperature": 1, "eda": 100, "ppg": 50, "imu": 50}
 
         # Initialize data buffers
         self.data_buffers = {
-            "emg": deque(maxlen=self.FS["emg"] * 60),
-            "ecg": deque(maxlen=self.FS["ecg"] * 60),
-            "temperature": deque(maxlen=self.FS["temperature"] * 60),
-            "eda": deque(maxlen=self.FS["eda"] * 60),
-            "ppg_blue": deque(maxlen=int(self.FS["ppg"] * 60)),
-            "ppg_green": deque(maxlen=int(self.FS["ppg"] * 60)),
-            "ppg_red": deque(maxlen=int(self.FS["ppg"] * 60)),
-            "ppg_ir": deque(maxlen=int(self.FS["ppg"] * 60)),
-            "ax": deque(maxlen=self.FS["imu"] * 60),
-            "ay": deque(maxlen=self.FS["imu"] * 60),
-            "az": deque(maxlen=self.FS["imu"] * 60),
+            "emg": deque(maxlen=self.FS["emg"] * self.window_length_seconds),
+            "ecg": deque(maxlen=self.FS["ecg"] * self.window_length_seconds),
+            "temperature": deque(maxlen=self.FS["temperature"] * self.window_length_seconds),
+            "eda": deque(maxlen=self.FS["eda"] * self.window_length_seconds),
+            "ppg_blue": deque(maxlen=int(self.FS["ppg"] * self.window_length_seconds)),
+            "ppg_green": deque(maxlen=int(self.FS["ppg"] * self.window_length_seconds)),
+            "ppg_red": deque(maxlen=int(self.FS["ppg"] * self.window_length_seconds)),
+            "ppg_ir": deque(maxlen=int(self.FS["ppg"] * self.window_length_seconds)),
+            "ax": deque(maxlen=self.FS["imu"] * self.window_length_seconds),
+            "ay": deque(maxlen=self.FS["imu"] * self.window_length_seconds),
+            "az": deque(maxlen=self.FS["imu"] * self.window_length_seconds),
         }
         
         # Storage for all recorded data
