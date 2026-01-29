@@ -22,7 +22,7 @@ import json
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
 # Dataset path - CHANGE THIS to your dataset location
-DATASET_PATH = Path("C:\MasterProject\VS_Camera\Test_modify\dataset")
+DATASET_PATH = Path(r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data")
 
 # Output directories
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -100,7 +100,10 @@ SIGNALS: Dict[str, SignalConfig] = {
         channels=1,
         file_name='biopoint_ppg_blue.csv'
     ),
-    # NOTE: joints is DISABLED as model input - used only for ground truth labels
+    # NOTE: joints is DISABLED as model input - used only for ground truth label extraction
+    # joint_data.json contains skeleton keypoints from Azure Kinect body tracking
+    # Used to derive phase transitions and rep counts through kinematic analysis
+    # NOT used as direct model input - model learns from biosignals only
     'joints': SignalConfig(
         name='joints',
         sampling_rate=30.0,
@@ -115,19 +118,27 @@ SIGNALS: Dict[str, SignalConfig] = {
 # TASK-SIGNAL MAPPING
 # =============================================================================
 
-# Which signals are used for each prediction task
-# NOTE: joint_data is used for GROUND TRUTH labels only (phase detection), NOT as model input
+# Which biosignals are used as MODEL INPUT for each prediction task
+# Note: Ground truth labels come from markers.json and joint_data.json, NOT from these signals
+#
+# Ground truth sources:
+#   - markers.json: Primary source for rep counts and phase labels (manual annotation)
+#   - joint_data.json: Auxiliary source for phase detection from kinematics
+#   - Both are ONLY for labels, NOT used as model input features
 TASK_SIGNALS: Dict[str, List[str]] = {
     # Exercise classification uses movement + physiological data
     'exercise': ['emg', 'ecg', 'acc', 'ppg_ir'],
 
-    # Repetition counting uses movement-based signals
+    # Repetition counting: learns from movement signals
+    # Ground truth rep counts from markers.json (rep markers) or joint_data (peak detection)
     'reps': ['acc', 'emg'],
 
-    # Phase detection uses movement + muscle signals (ground truth from joint_data)
+    # Phase detection: learns from movement + muscle activity
+    # Ground truth phases from markers.json (phase annotations) or joint_data (kinematic analysis)
     'phase': ['acc', 'emg'],
 
     # Fatigue estimation uses physiological indicators
+    # Ground truth fatigue from joint_data (velocity degradation) or time-based progress
     'fatigue': ['emg', 'ecg', 'ppg_ir', 'eda']
 }
 
@@ -152,7 +163,12 @@ class DataConfig:
     train_val_split: float = 0.2
     random_seed: int = 42
 
-    # JSON files
+    # Ground truth label files
+    # markers.json: Manual annotations for exercise start/end, repetition markers, phase transitions
+    #               Primary source for ground truth labels (rep counting, phase detection)
+    # joint_data.json: Azure Kinect skeleton keypoints (32 joints x 3D coordinates at 30Hz)
+    #                  Auxiliary source - used to derive phases from kinematics when markers insufficient
+    #                  NOT used as model input (only for ground truth label extraction)
     markers_file: str = 'markers.json'
     joints_file: str = 'joint_data.json'
 

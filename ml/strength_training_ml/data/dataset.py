@@ -60,10 +60,11 @@ class StrengthTrainingDataset(Dataset):
         }
 
         # Phase label mapping
+        # Note: Phases should always be known from markers.json ground truth
+        # If phase is unknown, the window should be skipped during preprocessing
         self.phase_to_idx = {
             'eccentric': 0,
-            'concentric': 1,
-            'unknown': 0  # Default to eccentric if unknown
+            'concentric': 1
         }
         self.idx_to_phase = {
             0: 'eccentric',
@@ -134,9 +135,20 @@ class StrengthTrainingDataset(Dataset):
                 )
                 signals_dict[signal_name] = torch.zeros(1, expected_samples)
 
-        # Prepare targets (phase label comes from joint_data ground truth)
+        # Prepare targets
+        # Phase and rep labels come from markers.json ground truth
+        # Joint data is used only for deriving markers, not as model input
         exercise_label = self.exercise_to_idx.get(window.get('exercise', 'Squat'), 0)
-        phase_label = self.phase_to_idx.get(window.get('phase', 'unknown'), 0)
+
+        # Handle phase label - should always be known from markers.json
+        phase_str = window.get('phase', None)
+        if phase_str not in self.phase_to_idx:
+            # If phase is missing/unknown, default to eccentric but this indicates
+            # a problem with preprocessing - phases should be extracted from markers
+            phase_label = 0  # eccentric
+        else:
+            phase_label = self.phase_to_idx[phase_str]
+
         rep_count = window.get('rep_count', 0)
         fatigue_score = window.get('fatigue_score', 0.0)
 
@@ -364,7 +376,8 @@ class SlidingWindowInference:
             tensor = torch.FloatTensor(signal_data).unsqueeze(0).unsqueeze(0)
             input_dict[signal_name] = tensor.to(self.device)
 
-        # Handle joint features
+        # Handle joint features (joints are NOT used as model input, only for ground truth)
+        # This code is legacy and should be removed if model doesn't expect joint input
         if joint_features is not None:
             if 'joints' in self.scalers:
                 joint_features = self.scalers['joints'].transform(
@@ -372,7 +385,12 @@ class SlidingWindowInference:
                 ).flatten()
             input_dict['joints'] = torch.FloatTensor(joint_features).unsqueeze(0).to(self.device)
         else:
-            n_joints = self.config.signals['joints'].channels
+            # Safe access to joints config
+            joints_cfg = self.config.signals.get('joints')
+            if joints_cfg is not None:
+                n_joints = joints_cfg.channels
+            else:
+                n_joints = 96  # Default: 32 joints x 3 coordinates
             input_dict['joints'] = torch.zeros(1, n_joints).to(self.device)
 
         # Forward pass

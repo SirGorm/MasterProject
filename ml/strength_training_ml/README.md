@@ -114,6 +114,59 @@ overlap = 0.5
 }
 ```
 
+## Data Architecture
+
+### Data Flow Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     DATA SOURCES                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  BIOSIGNALS (Model Input)        GROUND TRUTH (Labels)      │
+│  ├─ EMG (2000 Hz)                ├─ markers.json            │
+│  ├─ ECG (500 Hz)                 │   ├─ Start/end times    │
+│  ├─ EDA (50 Hz)                  │   ├─ Rep markers (M1,...)│
+│  ├─ Accelerometer (50 Hz)        │   └─ Phase annotations  │
+│  └─ PPG IR/Red/Green/Blue        │                          │
+│                                   └─ joint_data.json         │
+│                                       ├─ Skeleton keypoints │
+│                                       ├─ Kinematic analysis │
+│                                       └─ Velocity patterns  │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    PREPROCESSING                             │
+├─────────────────────────────────────────────────────────────┤
+│  Biosignals → NeuroKit2 → Windowing (2s, 50% overlap)      │
+│  markers.json → Extract rep counts, phases                  │
+│  joint_data.json → Derive phases from kinematics (fallback)│
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  TRAINING WINDOWS                            │
+├─────────────────────────────────────────────────────────────┤
+│  Each window contains:                                       │
+│    - Signals: {emg, ecg, eda, acc, ppg_*}  (Model Input)   │
+│    - Labels:  {exercise, phase, reps, fatigue}  (Target)   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Ground Truth Label Sources
+
+| Label | Primary Source | Derivation Method | Fallback |
+|-------|---------------|-------------------|----------|
+| **Exercise Type** | Session metadata | Manual annotation | - |
+| **Rep Count** | markers.json | Count rep markers (M1, M2, ...) up to window | joint_data peak detection |
+| **Phase** | joint_data | Kinematic analysis (velocity direction) | markers.json phase annotations |
+| **Fatigue** | joint_data | Velocity degradation over time | Time-based progress |
+
+**Important Notes:**
+- `joint_data.json` is **DISABLED** as model input (config: `enabled=False`)
+- Skeleton keypoints are used **ONLY** to derive ground truth labels
+- The model learns to predict phases/reps from biosignals alone
+- This ensures the model can work without camera/skeleton tracking at inference time
+
 ## Model Architecture
 
 ```

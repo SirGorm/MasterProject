@@ -5,9 +5,14 @@ Handles:
 - Signal loading and cleaning
 - NeuroKit2-based feature extraction (EMG, ECG, EDA, PPG)
 - IMU/Accelerometer preprocessing
-- Joint data processing
 - Time-based windowing with configurable overlap
 
+Data Sources:
+- Biosignals (EMG, ECG, EDA, PPG, IMU): Model input features
+- markers.json: Ground truth labels (start/end times, rep markers, phases)
+- joint_data.json: Auxiliary ground truth (skeleton for phase/rep derivation)
+
+Note: joint_data is NOT used as model input (only for ground truth label extraction)
 Features can be combined with raw signals for model input.
 """
 
@@ -1022,7 +1027,23 @@ class DataPreprocessor:
 
                 window_data['signals'][signal_name] = window_signal
 
-            # Extract joint features and ground truth labels from joint_data
+            # GROUND TRUTH LABEL EXTRACTION
+            # Primary source: markers.json (manually annotated)
+            # Auxiliary source: joint_data (derived from skeleton tracking)
+            #
+            # markers.json provides:
+            #   - Exercise start/end times
+            #   - Repetition markers (each marker = completed rep)
+            #   - Phase transitions (eccentric/concentric markers if annotated)
+            #
+            # joint_data provides:
+            #   - Skeleton keypoints for visual verification
+            #   - Can be used to derive phases from movement patterns
+            #   - Velocity/position analysis for fatigue estimation
+            #
+            # Note: joint_data is NOT used as model input (disabled in config)
+
+            # Extract ground truth from joint_data (if available)
             if session_data.get('joint_data'):
                 window_data['joint_features'] = self.joint_processor.extract_joint_features(
                     session_data['joint_data'],
@@ -1031,7 +1052,7 @@ class DataPreprocessor:
                     exercise_type
                 )
 
-                # Detect phase from joint_data (ground truth)
+                # Detect phase from joint_data kinematics (ground truth)
                 window_data['phase'] = self.joint_processor.detect_phase(
                     session_data['joint_data'],
                     window_start,
@@ -1056,14 +1077,18 @@ class DataPreprocessor:
                     window_sec
                 )
             else:
-                # Fallback to marker-based rep count if no joint_data
+                # Fallback: Use markers.json for rep counting
+                # Count non-'start' markers up to current window end
                 rep_count = sum(
                     1 for m in marker_list
                     if m.get('time', 0) <= window_end and m.get('label', '').lower() != 'start'
                 )
                 window_data['rep_count'] = rep_count
 
-                # Fallback to time-based fatigue if no joint_data
+                # TODO: Extract phase labels from markers if annotated with phase info
+                # For now, phase remains 'unknown' without joint_data
+
+                # Fallback: Time-based fatigue estimation (simple progress metric)
                 progress = (window_start - start_time) / (end_time - start_time)
                 window_data['fatigue_score'] = progress
 
