@@ -1,0 +1,86 @@
+============================================================
+DATASET ANALYSIS REPORT
+============================================================
+
+1. DATASET OVERVIEW
+----------------------------------------
+Total exercises: 3
+Exercise types: Benchpress, Pullups, Squat
+Total sessions: 17
+
+2. PER-EXERCISE STATISTICS
+----------------------------------------
+
+Benchpress:
+  - Sessions: 6
+  - Total reps: 44
+  - Avg reps/session: 7.3
+  - Avg EMG amplitude: 2.29e-04
+
+Pullups:
+  - Sessions: 5
+  - Total reps: 50
+  - Avg reps/session: 10.0
+  - Avg EMG amplitude: 7.05e-05
+
+Squat:
+  - Sessions: 6
+  - Total reps: 51
+  - Avg reps/session: 8.5
+  - Avg EMG amplitude: 5.42e-06
+
+
+3. REP TIMING ANALYSIS
+----------------------------------------
+
+Benchpress:
+  - Mean interval: 2.17s
+  - Std interval: 0.23s
+  - Range: [1.70s, 2.57s]
+
+Pullups:
+  - Mean interval: 3.58s
+  - Std interval: 0.31s
+  - Range: [3.07s, 4.34s]
+
+Squat:
+  - Mean interval: 2.77s
+  - Std interval: 0.48s
+  - Range: [2.38s, 4.56s]
+
+
+4. DATA QUALITY NOTES
+----------------------------------------
+  - Sessions without markers: 3
+  - Sessions with <5 reps: 3
+
+5. SAMPLING RATES
+----------------------------------------
+  - emg: 2000 Hz
+  - ecg: 500 Hz
+  - temperature: 1 Hz
+  - eda: 100 Hz
+  - ppg: 50 Hz
+  - imu: 50 Hz
+
+6. FATIGUE INDICATOR SUMMARY
+----------------------------------------
+
+Benchpress:
+  - Avg interval slope: 0.0304 s/rep
+  - Avg EMG freq trend: -2.6841 Hz/rep
+  - Avg EDA trend: 3.42e-10 S/rep
+
+Pullups:
+  - Avg interval slope: 0.0390 s/rep
+  - Avg EMG freq trend: -1.0832 Hz/rep
+  - Avg EDA trend: 5.05e-10 S/rep
+
+Squat:
+  - Avg interval slope: -0.0233 s/rep
+  - Avg EMG freq trend: -1.0488 Hz/rep
+  - Avg EDA trend: 5.68e-11 S/rep
+
+============================================================
+END OF REPORT
+============================================================
