@@ -106,9 +106,9 @@ class ModelEvaluator:
             phase_true.extend(targets['phase'].cpu().numpy())
             phase_pred.extend(phase_preds.cpu().numpy())
             rep_true.extend(targets['reps'].cpu().numpy())
-            rep_pred.extend(rep_output.squeeze().cpu().numpy())
+            rep_pred.extend(rep_output.squeeze(-1).cpu().numpy())
             fatigue_true.extend(targets['fatigue'].cpu().numpy())
-            fatigue_pred.extend(fatigue_output.squeeze().cpu().numpy())
+            fatigue_pred.extend(fatigue_output.squeeze(-1).cpu().numpy())
 
         # Convert to numpy arrays
         exercise_true = np.array(exercise_true)
@@ -591,7 +591,7 @@ def evaluate_model(
     output_dir = output_dir or config.output.results_dir
 
     # Load model
-    checkpoint = torch.load(model_path, map_location='cpu')
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     model = create_model(config)
     model.load_state_dict(checkpoint['model_state_dict'])
 

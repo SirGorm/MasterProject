@@ -22,8 +22,8 @@ import json
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
 # Dataset path - CHANGE THIS to your dataset location
-#DATASET_PATH = Path(r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data") #skole
-DATASET_PATH = Path(r"C:\MasterProject\VS_Camera\Test_modify\dataset") # hjemme
+DATASET_PATH = Path(r"c:\Users\skogl\Downloads\eirikgsk\Master_git\dataset") #skole
+#DATASET_PATH = Path(r"C:\MasterProject\VS_Camera\Test_modify\dataset") # hjemme
 
 # Output directories
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -67,15 +67,27 @@ SIGNALS: Dict[str, SignalConfig] = {
     ),
     'eda': SignalConfig(
         name='eda',
-        sampling_rate=50.0,
+        sampling_rate=100.0,
         channels=1,
         file_name='biopoint_eda.csv'
     ),
-    'acc': SignalConfig(
-        name='acc',
+    'acc_x': SignalConfig(
+        name='acc_x',
         sampling_rate=50.0,
         channels=1,
-        file_name='biopoint_a_combined.csv'
+        file_name='biopoint_ax.csv'
+    ),
+    'acc_y': SignalConfig(
+        name='acc_y',
+        sampling_rate=50.0,
+        channels=1,
+        file_name='biopoint_ay.csv'
+    ),
+    'acc_z': SignalConfig(
+        name='acc_z',
+        sampling_rate=50.0,
+        channels=1,
+        file_name='biopoint_az.csv'
     ),
     'ppg_ir': SignalConfig(
         name='ppg_ir',
@@ -101,10 +113,10 @@ SIGNALS: Dict[str, SignalConfig] = {
         channels=1,
         file_name='biopoint_ppg_blue.csv'
     ),
-    # NOTE: joints is DISABLED as model input - used only for ground truth label extraction
+    # NOTE: joints is DISABLED as model input
     # joint_data.json contains skeleton keypoints from Azure Kinect body tracking
-    # Used to derive phase transitions and rep counts through kinematic analysis
-    # NOT used as direct model input - model learns from biosignals only
+    # Used for: ground truth fatigue (velocity degradation) + skeleton visualization
+    # NOT used as model input - the model learns from biosignals only
     'joints': SignalConfig(
         name='joints',
         sampling_rate=30.0,
@@ -120,23 +132,25 @@ SIGNALS: Dict[str, SignalConfig] = {
 # =============================================================================
 
 # Which biosignals are used as MODEL INPUT for each prediction task
-# Note: Ground truth labels come from markers.json and joint_data.json, NOT from these signals
+# Note: Ground truth labels come from markers.json + joint_data.json, NOT from these signals
 #
-# Ground truth sources:
-#   - markers.json: Primary source for rep counts and phase labels (manual annotation)
-#   - joint_data.json: Auxiliary source for phase detection from kinematics
-#   - Both are ONLY for labels, NOT used as model input features
+# Ground truth sources (not model input):
+#   - Exercise type: folder name (Squat/, Benchpress/, Deadlift/)
+#   - Phase: markers.json (manual peak/valley annotations)
+#   - Reps: markers.json (per-window binary: 0 or 1, accumulated during inference)
+#   - Fatigue: joint_data.json (velocity degradation) or time-based fallback [0→1]
+#   - Visualization: joint_data.json (skeleton frames)
 TASK_SIGNALS: Dict[str, List[str]] = {
     # Exercise classification uses movement + physiological data
-    'exercise': ['emg', 'ecg', 'acc', 'ppg_ir'],
+    'exercise': ['emg', 'ecg', 'acc_x', 'acc_y', 'acc_z', 'ppg_ir'],
 
-    # Repetition counting: learns from movement signals
-    # Ground truth rep counts from markers.json (rep markers) or joint_data (peak detection)
-    'reps': ['acc', 'emg'],
+    # Rep detection: per-window binary (did a rep complete in this window?)
+    # Ground truth from markers.json; accumulated during live inference
+    'reps': ['acc_x', 'acc_y', 'acc_z', 'emg'],
 
     # Phase detection: learns from movement + muscle activity
-    # Ground truth phases from markers.json (phase annotations) or joint_data (kinematic analysis)
-    'phase': ['acc', 'emg'],
+    # Ground truth phases from markers.json (phase transition markers)
+    'phase': ['acc_x', 'acc_y', 'acc_z', 'emg'],
 
     # Fatigue estimation uses physiological indicators
     # Ground truth fatigue from joint_data (velocity degradation) or time-based progress
@@ -154,22 +168,23 @@ class DataConfig:
 
     # Dataset settings
     dataset_path: Path = DATASET_PATH
-    exercises: List[str] = field(default_factory=lambda: ['Squat', 'Benchpress', 'Pullups'])
+    exercises: List[str] = field(default_factory=lambda: ['Squat', 'Benchpress', 'Deadlift'])  # 'Pullup' disabled - bad marker data
 
     # Time windowing (in seconds, not samples)
     time_window_sec: float = 2.0
-    overlap: float = 0.5  # 50% overlap for sliding windows
+    overlap: float = 0.0  # 50% overlap for sliding windows
 
     # Train/validation split
     train_val_split: float = 0.2
     random_seed: int = 42
 
-    # Ground truth label files
+    # Ground truth label files (NOT used as model input)
     # markers.json: Manual annotations for exercise start/end, repetition markers, phase transitions
-    #               Primary source for ground truth labels (rep counting, phase detection)
+    #               Ground truth for: phase (peak/valley alternation), reps (completed marker pairs)
     # joint_data.json: Azure Kinect skeleton keypoints (32 joints x 3D coordinates at 30Hz)
-    #                  Auxiliary source - used to derive phases from kinematics when markers insufficient
-    #                  NOT used as model input (only for ground truth label extraction)
+    #                  Ground truth for: fatigue (velocity degradation over the set)
+    #                  Also used for: skeleton visualization
+    #                  Fallback: time-based fatigue [0→1] if joint_data unavailable
     markers_file: str = 'markers.json'
     joints_file: str = 'joint_data.json'
 
@@ -205,8 +220,8 @@ class ModelConfig:
     # General
     dropout: float = 0.3
 
-    # Output heads
-    n_exercises: int = 3
+    # Output heads (n_exercises is set automatically from DataConfig.exercises)
+    n_exercises: int = 0  # auto-set in Config.__post_init__
     n_phases: int = 2  # Eccentric, Concentric
 
 
@@ -325,7 +340,7 @@ class TrackingConfig:
 
     # Number of random windows to sample and save per epoch
     # Set to 0 to track all windows (uses more memory)
-    n_samples_per_epoch: int = 50
+    n_samples_per_epoch: int = 3
 
     # Store options
     store_signals: bool = True      # Store input signal data
@@ -340,7 +355,7 @@ class TrackingConfig:
     # Auto-save settings
     auto_save: bool = True          # Auto-save after training
     save_visualizations: bool = True  # Save visualizations of random samples
-    n_visualizations: int = 10      # Number of visualizations to generate
+    n_visualizations: int = 2      # Number of visualizations to generate
 
     # Visualization selection mode
     # 'random': Select random windows (uses n_visualizations)
@@ -349,7 +364,7 @@ class TrackingConfig:
 
     # List of specific window indices to visualize (used when visualization_mode='specific')
     # Example: [0, 1, 2, 3, 4, 5] or [10, 20, 30]
-    specific_window_indices: List[int] = field(default_factory=lambda: [10, 11, 12, 13, 14, 15])
+    specific_window_indices: List[int] = field(default_factory=lambda: [10])
 
     # Output directory (relative to output_dir)
     tracking_subdir: str = "prediction_tracking"
@@ -413,8 +428,8 @@ class PhaseDetectionConfig:
     auto_train: bool = True                # Auto-train if no model exists
     save_trained_model: bool = True        # Save model after training
 
-    # Phase names
-    phases: List[str] = field(default_factory=lambda: ['rest', 'concentric', 'eccentric'])
+    # Phase names (must match model output and dataset label mapping)
+    phases: List[str] = field(default_factory=lambda: ['eccentric', 'concentric'])
 
 
 # =============================================================================
@@ -467,6 +482,8 @@ class Config:
     def __post_init__(self):
         """Initialize and validate configuration."""
         self.output.ensure_directories()
+        # Auto-set n_exercises from the exercises list
+        self.model.n_exercises = len(self.data.exercises)
 
     def get_device(self) -> str:
         """Get the device to use for training."""

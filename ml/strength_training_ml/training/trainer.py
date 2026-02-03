@@ -108,7 +108,8 @@ class Trainer:
                 output_dir=tracking_dir,
                 max_records=self.config.tracking.max_records,
                 store_signals=self.config.tracking.store_signals,
-                store_logits=self.config.tracking.store_logits
+                store_logits=self.config.tracking.store_logits,
+                config=self.config
             )
             self.logger.info(f"Prediction tracking enabled: {tracking_dir}")
 
@@ -262,10 +263,10 @@ class Trainer:
                 correct_phase += pred_phase.eq(phase_labels).sum().item()
 
                 # Rep MAE
-                total_rep_mae += torch.abs(rep_pred.squeeze() - rep_labels.float()).sum().item()
+                total_rep_mae += torch.abs(rep_pred.squeeze(-1) - rep_labels.float()).sum().item()
 
                 # Fatigue MAE
-                total_fatigue_mae += torch.abs(fatigue_pred.squeeze() - fatigue_labels.float()).sum().item()
+                total_fatigue_mae += torch.abs(fatigue_pred.squeeze(-1) - fatigue_labels.float()).sum().item()
 
             except Exception as e:
                 self.logger.error(f"Error in batch {batch_idx}: {e}")
@@ -344,10 +345,10 @@ class Trainer:
                 correct_phase += pred_phase.eq(phase_labels).sum().item()
 
                 # Rep MAE
-                total_rep_mae += torch.abs(rep_pred.squeeze() - rep_labels.float()).sum().item()
+                total_rep_mae += torch.abs(rep_pred.squeeze(-1) - rep_labels.float()).sum().item()
 
                 # Fatigue MAE
-                total_fatigue_mae += torch.abs(fatigue_pred.squeeze() - fatigue_labels.float()).sum().item()
+                total_fatigue_mae += torch.abs(fatigue_pred.squeeze(-1) - fatigue_labels.float()).sum().item()
 
                 # Collect batch for tracking
                 if track_predictions and self.tracker and self.config.tracking.track_val:

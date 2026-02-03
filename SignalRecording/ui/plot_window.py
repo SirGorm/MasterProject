@@ -432,11 +432,11 @@ class PlotWindow(QtWidgets.QMainWindow):
         """Add visual marker to all plot widgets."""
         if label not in self.marker_items:
             self.marker_items[label] = []
-        
+
         for plot_widget in self.plot_widgets:
             marker = MarkerItem(time_pos, label, color, movable=True)
-            plot_widget.addItem(marker)
-            plot_widget.addItem(marker.text_label)
+            plot_widget.addItem(marker, ignoreBounds=True)
+            plot_widget.addItem(marker.text_label, ignoreBounds=True)
             self.marker_items[label].append(marker)
             marker.sigPositionChanged.connect(lambda m=marker, l=label: self.on_marker_moved(m, l))
 

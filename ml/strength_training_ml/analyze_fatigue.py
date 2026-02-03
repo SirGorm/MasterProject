@@ -273,7 +273,8 @@ class FatigueAnalyzer:
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-        colors = {'Squat': 'blue', 'Benchpress': 'red', 'Pullups': 'green'}
+        palette = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'cyan']
+        colors = {ex: palette[i % len(palette)] for i, ex in enumerate(by_exercise.keys())}
 
         # 1. Average fatigue progression
         ax1 = axes[0, 0]

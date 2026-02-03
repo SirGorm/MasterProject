@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*.exe
+nul
+.claude/
+ml/strength_training_ml/output/

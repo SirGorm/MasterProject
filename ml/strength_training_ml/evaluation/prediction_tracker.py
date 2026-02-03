@@ -91,6 +91,7 @@ class PredictionTracker:
         self,
         output_dir: Path = None,
         max_records: int = 10000,
+        config=None,
         store_signals: bool = True,
         store_logits: bool = True
     ):
@@ -114,8 +115,17 @@ class PredictionTracker:
         self.records: List[PredictionRecord] = []
         self.record_counter = 0
 
-        # Index mappings
-        self.idx_to_exercise = {0: 'Squat', 1: 'Benchpress', 2: 'Pullups'}
+        # Index mappings - built from config exercises list
+        if config is not None:
+            exercises = config.data.exercises
+        else:
+            try:
+                from strength_training_ml.config.settings import CONFIG
+                exercises = CONFIG.data.exercises
+            except ImportError:
+                from ..config.settings import CONFIG
+                exercises = CONFIG.data.exercises
+        self.idx_to_exercise = {i: ex for i, ex in enumerate(exercises)}
         self.idx_to_phase = {0: 'eccentric', 1: 'concentric'}
 
         # Statistics

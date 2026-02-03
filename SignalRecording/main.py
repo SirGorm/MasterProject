@@ -13,6 +13,7 @@ def main():
     worker = SifiBridgeWorker(device_type=sbp.DeviceType.BIOPOINT_V1_3)
     kinect_worker = KinectControlWorker()
 
+    
     # Create threads
     thread = QtCore.QThread()
     kinect_thread = QtCore.QThread()

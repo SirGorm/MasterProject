@@ -111,7 +111,7 @@ class StrengthTrainingDataset(Dataset):
 
     def _fit_scalers(self):
         """Fit scalers on training data (only for enabled signals)."""
-        # Only fit scalers for enabled signals (not joints - that's for ground truth only)
+        # Only fit scalers for enabled signals (joints is disabled)
         signal_data = {
             name: [] for name, cfg in SIGNALS.items()
             if cfg.enabled
@@ -141,11 +141,11 @@ class StrengthTrainingDataset(Dataset):
         """
         window = self.windows[idx]
 
-        # Prepare signals (only enabled signals, excluding joints which is for ground truth only)
+        # Prepare signals (only enabled signals)
         signals_dict = {}
 
         for signal_name, signal_config in SIGNALS.items():
-            # Skip disabled signals (joints is disabled - used for ground truth labels only)
+            # Skip disabled signals
             if not signal_config.enabled:
                 continue
 
@@ -169,16 +169,18 @@ class StrengthTrainingDataset(Dataset):
                 signals_dict[signal_name] = torch.zeros(1, expected_samples)
 
         # Prepare targets
-        # Phase and rep labels come from markers.json ground truth
-        # Joint data is used only for deriving markers, not as model input
+        # Ground truth: exercise from folder, phase from markers.json,
+        # reps: per-window binary (0 or 1) from markers.json,
+        # fatigue from joint_data.json (or time-based fallback)
         exercise_label = self.exercise_to_idx.get(window.get('exercise', 'Squat'), 0)
 
-        # Handle phase label - should always be known from markers.json
+        # Handle phase label - from markers.json
         phase_str = window.get('phase', None)
         if phase_str not in self.phase_to_idx:
-            # If phase is missing/unknown, default to eccentric but this indicates
-            # a problem with preprocessing - phases should be extracted from markers
-            phase_label = 0  # eccentric
+            print(f"      WARNING: Unknown phase '{phase_str}' in window {idx} "
+                  f"(session: {window.get('session_id', '?')}). "
+                  f"Check markers.json - need intermediate markers for phase labels.")
+            phase_label = 0  # fallback to eccentric
         else:
             phase_label = self.phase_to_idx[phase_str]
 
@@ -213,7 +215,7 @@ class StrengthTrainingDataset(Dataset):
         """Get shape information for each enabled signal type."""
         shapes = {}
         for signal_name, signal_config in SIGNALS.items():
-            # Only include enabled signals (not joints - that's for ground truth only)
+            # Only include enabled signals
             if not signal_config.enabled:
                 continue
             seq_len = signal_config.samples_per_window(
@@ -441,29 +443,33 @@ class SlidingWindowInference:
 
         # Forward pass
         with torch.no_grad():
-            exercise_logits, phase_logits, rep_pred, fatigue_delta = self.model(input_dict)
+            exercise_logits, phase_logits, rep_pred, fatigue_pred = self.model(input_dict)
 
             # Get predictions
             exercise_pred = torch.argmax(exercise_logits, dim=1).item()
             phase_pred = torch.argmax(phase_logits, dim=1).item()
-            rep_delta = rep_pred.item()
-            fatigue_delta_val = fatigue_delta.item()
+            # Model predicts per-window rep detection (0 or 1):
+            # value > 0.5 means a rep was completed in this window
+            rep_detected = rep_pred.item()
+            fatigue_pred_val = min(1.0, max(0.0, fatigue_pred.item()))
 
-        # Update state
-        self.current_rep_count = max(0, self.current_rep_count + rep_delta)
-        self.cumulative_fatigue += fatigue_delta_val
+        # Accumulate per-window rep detections for live counting
+        if rep_detected > 0.5:
+            self.current_rep_count += 1
+        self.cumulative_fatigue = fatigue_pred_val
 
         # Create result
         result = {
             'exercise': self.config.data.exercises[exercise_pred],
             'phase': 'eccentric' if phase_pred == 0 else 'concentric',
-            'rep_count': int(round(self.current_rep_count)),
-            'fatigue_level': min(1.0, max(0.0, self.cumulative_fatigue)),
+            'rep_count': self.current_rep_count,  # Accumulated count
+            'rep_detected': rep_detected > 0.5,   # Was a rep detected this window?
+            'fatigue_level': self.cumulative_fatigue,
             'raw_predictions': {
                 'exercise_logits': exercise_logits.cpu().numpy(),
                 'phase_logits': phase_logits.cpu().numpy(),
-                'rep_delta': rep_delta,
-                'fatigue_delta': fatigue_delta_val
+                'rep_detection': rep_detected,  # Raw model output (0-1)
+                'fatigue': fatigue_pred_val
             }
         }
 

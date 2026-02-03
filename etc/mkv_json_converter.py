@@ -6,7 +6,7 @@ import time
 exe_path = r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\Offline_processor\build\bin\Debug\offline_processor.exe"
 
 # Path to dataset - UPDATE THIS to match your actual dataset location
-root_path = r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data"   # Dataset
+root_path = r"c:\Users\skogl\Downloads\eirikgsk\Master_git\dataset"   # Dataset
 
 # Counters
 total_mkv_files = 0

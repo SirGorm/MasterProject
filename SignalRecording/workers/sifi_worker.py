@@ -25,6 +25,9 @@ class SifiBridgeWorker(QtCore.QObject):
         self.device_type = device_type
         self.running = False
         self.is_connected = False
+        self.devices = self.sb.list_devices(sbp.ListSources.BLE)
+        print("Available devices:")
+        print(self.devices)
 
     @QtCore.pyqtSlot()
     def connect_default(self):

@@ -7,6 +7,7 @@ Uses Optuna for efficient Bayesian optimization.
 import optuna
 from optuna.trial import Trial
 import torch
+import copy
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -31,8 +32,8 @@ def objective(trial: Trial, n_epochs: int = 10) -> float:
     Returns:
         Validation loss (lower is better)
     """
-    # Sample hyperparameters
-    config = CONFIG
+    # Deep copy config so each trial is independent
+    config = copy.deepcopy(CONFIG)
 
     # Learning rate (log scale)
     config.training.learning_rate = trial.suggest_float(
@@ -54,39 +55,43 @@ def objective(trial: Trial, n_epochs: int = 10) -> float:
         'weight_decay', 1e-6, 1e-2, log=True
     )
 
-    # Model architecture
-    config.model.hidden_dim = trial.suggest_categorical(
-        'hidden_dim', [64, 128, 256]
+    # Model architecture (use correct attribute names from ModelConfig)
+    config.model.fusion_dim = trial.suggest_categorical(
+        'fusion_dim', [128, 256, 512]
     )
 
-    config.model.lstm_hidden = trial.suggest_categorical(
-        'lstm_hidden', [64, 128, 256]
+    config.model.lstm_hidden_size = trial.suggest_categorical(
+        'lstm_hidden_size', [64, 128, 256]
     )
 
-    config.model.lstm_layers = trial.suggest_int(
-        'lstm_layers', 1, 3
+    config.model.lstm_num_layers = trial.suggest_int(
+        'lstm_num_layers', 1, 3
     )
 
     config.model.dropout = trial.suggest_float(
         'dropout', 0.1, 0.5
     )
 
-    # Loss weights
-    config.training.exercise_weight = trial.suggest_float(
+    # Loss weights (use correct attribute: loss_weights dict)
+    config.training.loss_weights['exercise'] = trial.suggest_float(
         'exercise_weight', 0.5, 2.0
     )
 
-    config.training.phase_weight = trial.suggest_float(
+    config.training.loss_weights['phase'] = trial.suggest_float(
         'phase_weight', 0.5, 2.0
     )
 
-    config.training.rep_weight = trial.suggest_float(
+    config.training.loss_weights['reps'] = trial.suggest_float(
         'rep_weight', 0.1, 1.0
     )
 
-    config.training.fatigue_weight = trial.suggest_float(
+    config.training.loss_weights['fatigue'] = trial.suggest_float(
         'fatigue_weight', 0.1, 1.0
     )
+
+    # Reduced epochs for search, tracking disabled for speed
+    config.training.n_epochs = n_epochs
+    config.tracking.enabled = False
 
     # Create data loaders
     try:
@@ -98,11 +103,6 @@ def objective(trial: Trial, n_epochs: int = 10) -> float:
     # Create model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = create_model(config).to(device)
-
-    # Create trainer with reduced epochs
-    original_epochs = config.training.n_epochs
-    config.training.n_epochs = n_epochs
-    config.tracking.enabled = False  # Disable tracking for speed
 
     trainer = Trainer(
         model=model,
@@ -119,9 +119,6 @@ def objective(trial: Trial, n_epochs: int = 10) -> float:
     except Exception as e:
         print(f"Training failed: {e}")
         raise optuna.TrialPruned()
-    finally:
-        config.training.n_epochs = original_epochs
-        config.tracking.enabled = True
 
     # Report intermediate values for pruning
     trial.report(val_loss, n_epochs)
@@ -240,25 +237,25 @@ def apply_best_params(params: Dict[str, Any]):
     if 'weight_decay' in params:
         config.training.weight_decay = params['weight_decay']
 
-    # Model params
-    if 'hidden_dim' in params:
-        config.model.hidden_dim = params['hidden_dim']
-    if 'lstm_hidden' in params:
-        config.model.lstm_hidden = params['lstm_hidden']
-    if 'lstm_layers' in params:
-        config.model.lstm_layers = params['lstm_layers']
+    # Model params (correct attribute names from ModelConfig)
+    if 'fusion_dim' in params:
+        config.model.fusion_dim = params['fusion_dim']
+    if 'lstm_hidden_size' in params:
+        config.model.lstm_hidden_size = params['lstm_hidden_size']
+    if 'lstm_num_layers' in params:
+        config.model.lstm_num_layers = params['lstm_num_layers']
     if 'dropout' in params:
         config.model.dropout = params['dropout']
 
-    # Loss weights
+    # Loss weights (correct attribute: loss_weights dict)
     if 'exercise_weight' in params:
-        config.training.exercise_weight = params['exercise_weight']
+        config.training.loss_weights['exercise'] = params['exercise_weight']
     if 'phase_weight' in params:
-        config.training.phase_weight = params['phase_weight']
+        config.training.loss_weights['phase'] = params['phase_weight']
     if 'rep_weight' in params:
-        config.training.rep_weight = params['rep_weight']
+        config.training.loss_weights['reps'] = params['rep_weight']
     if 'fatigue_weight' in params:
-        config.training.fatigue_weight = params['fatigue_weight']
+        config.training.loss_weights['fatigue'] = params['fatigue_weight']
 
     print("Applied best hyperparameters to CONFIG")
 

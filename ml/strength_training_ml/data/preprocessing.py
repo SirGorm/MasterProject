@@ -9,11 +9,14 @@ Handles:
 
 Data Sources:
 - Biosignals (EMG, ECG, EDA, PPG, IMU): Model input features
-- markers.json: Ground truth labels (start/end times, rep markers, phases)
-- joint_data.json: Auxiliary ground truth (skeleton for phase/rep derivation)
+- markers.json: Ground truth for phase and reps (NOT model input)
+- joint_data.json: Ground truth for fatigue + skeleton visualization (NOT model input)
 
-Note: joint_data is NOT used as model input (only for ground truth label extraction)
-Features can be combined with raw signals for model input.
+Ground truth label sources:
+  Exercise: folder name (Squat/, Benchpress/, Deadlift/)
+  Phase:    markers.json peak/valley alternation
+  Reps:     markers.json completed marker pairs
+  Fatigue:  joint_data.json velocity degradation (fallback: time-based [0→1])
 """
 
 import numpy as np
@@ -706,8 +709,11 @@ class JointProcessor:
         elif exercise_type.lower() == 'benchpress':
             # Bench: eccentric = lowering bar (Y decreases), concentric = pushing up (Y increases)
             return 'eccentric' if movement < 0 else 'concentric'
-        elif exercise_type.lower() == 'pullups':
+        elif exercise_type.lower() in ('pullups', 'pullup'):
             # Pullups: concentric = pulling up (Y increases), eccentric = lowering (Y decreases)
+            return 'eccentric' if movement < 0 else 'concentric'
+        elif exercise_type.lower() == 'deadlift':
+            # Deadlift: eccentric = lowering (Y decreases), concentric = lifting (Y increases)
             return 'eccentric' if movement < 0 else 'concentric'
 
         return 'unknown'
@@ -989,6 +995,93 @@ class DataPreprocessor:
             joint_data, start_time, end_time, exercise_type
         )
 
+    @staticmethod
+    def _phase_and_reps_from_markers(
+        marker_list: List[Dict],
+        window_start: float,
+        window_end: float,
+        exercise_type: str = ''
+    ) -> Tuple[str, int]:
+        """
+        Derive phase label and per-window rep detection from markers.json.
+
+        The first phase depends on the exercise:
+          - Squat, Benchpress, Deadlift: start with eccentric (lowering)
+          - Pullups: start with concentric (pulling up)
+
+        Marker pattern (e.g. Squat):
+            start -[eccentric]- M1 -[concentric]- M2 -[eccentric]- M3 ...
+        Marker pattern (e.g. Pullups):
+            start -[concentric]- M1 -[eccentric]- M2 -[concentric]- M3 ...
+
+        Each consecutive pair of intervals forms one complete repetition.
+
+        Rep detection is per-window: returns 1 if a rep was completed within
+        this window, 0 otherwise. This enables live rep counting during
+        inference by accumulating per-window detections.
+
+        Args:
+            marker_list: List of marker dicts with 'time' and 'label' keys
+            window_start: Start time of the current window
+            window_end: End time of the current window
+            exercise_type: Exercise name (e.g. 'Squat', 'Pullups')
+
+        Returns:
+            (phase, rep_in_window) where phase is 'eccentric'/'concentric'/'unknown'
+            and rep_in_window is 0 or 1 (whether a rep completed in this window).
+        """
+        # Get sorted marker times (start first, then intermediates, stop last)
+        times = sorted(m.get('time', 0) for m in marker_list)
+
+        if len(times) < 2:
+            return 'unknown', 0
+
+        # Need at least 3 markers (start + 1 transition + stop) for phase labels
+        if len(times) < 3:
+            return 'unknown', 0
+
+        # Determine phase order based on exercise type
+        # Pullups start concentric (pulling up), all others start eccentric (lowering)
+        if exercise_type.lower() in ('pullups', 'pullup', 'pull-ups'):
+            phase_order = ('concentric', 'eccentric')
+        else:
+            phase_order = ('eccentric', 'concentric')
+
+        # Use window midpoint to determine which interval we're in
+        window_mid = (window_start + window_end) / 2
+
+        # Find which interval the midpoint falls in
+        # Interval i is between times[i] and times[i+1]
+        interval_idx = -1
+        for i in range(len(times) - 1):
+            if times[i] <= window_mid < times[i + 1]:
+                interval_idx = i
+                break
+
+        # If midpoint is past the last marker
+        if interval_idx == -1:
+            if window_mid >= times[-1]:
+                interval_idx = len(times) - 2
+            else:
+                return 'unknown', 0
+
+        # Phase alternates based on exercise-specific order
+        phase = phase_order[interval_idx % 2]
+
+        # Per-window rep detection: check if any rep completion point falls
+        # within this window's time range [window_start, window_end).
+        # A rep completes at the end of its second phase (times[pair_start + 2]).
+        rep_in_window = 0
+        for pair_start in range(0, len(times) - 1, 2):
+            pair_end_idx = pair_start + 2
+            if pair_end_idx < len(times):
+                rep_completion_time = times[pair_end_idx]
+                if window_start <= rep_completion_time < window_end:
+                    rep_in_window = 1
+                    break  # At most 1 rep per window
+
+        return phase, rep_in_window
+
     def train_phase_detector(
         self,
         valid_sessions: List[Tuple[str, str, Path]]
@@ -1153,7 +1246,7 @@ class DataPreprocessor:
                     processed, features = self.signal_processor.preprocess_ppg(
                         signal_data, signal_config.sampling_rate
                     )
-                elif signal_name == 'acc':
+                elif signal_name.startswith('acc'):
                     processed, features = self.signal_processor.preprocess_accelerometer(
                         signal_data, signal_config.sampling_rate
                     )
@@ -1239,6 +1332,19 @@ class DataPreprocessor:
         start_time = start_marker.get('time', 0)
         end_time = marker_list[-1].get('time', 0)
 
+        # Clamp to actual signal duration to prevent bad markers from creating empty windows
+        signal_max_time = 0.0
+        for sig_name, sig_info in session_data.get('signals', {}).items():
+            if 'time' in sig_info and len(sig_info['time']) > 0:
+                signal_max_time = max(signal_max_time, float(sig_info['time'][-1]))
+        if signal_max_time > 0:
+            if start_time < 0:
+                print(f"      WARNING: Negative start time ({start_time:.1f}s), clamping to 0")
+                start_time = 0.0
+            if end_time > signal_max_time:
+                print(f"      WARNING: End time ({end_time:.1f}s) exceeds signal ({signal_max_time:.1f}s), clamping")
+                end_time = signal_max_time
+
         # Calculate window parameters
         window_sec = self.config.data.time_window_sec
         overlap = self.config.data.overlap
@@ -1291,54 +1397,38 @@ class DataPreprocessor:
                 window_data['signals'][signal_name] = window_signal
 
             # GROUND TRUTH LABEL EXTRACTION
-            # Primary source: markers.json (manually annotated)
-            # Auxiliary source: joint_data (derived from skeleton tracking)
             #
-            # markers.json provides:
-            #   - Exercise start/end times
-            #   - Repetition markers (each marker = completed rep)
-            #   - Phase transitions (eccentric/concentric markers if annotated)
+            # markers.json (manually annotated):
+            #   - Start/end times define the active exercise window
+            #   - Intermediate markers define phase transitions:
+            #     start -[eccentric]- M1 -[concentric]- M2 -[eccentric]- M3 ...
+            #     Each pair of intervals = one complete repetition
+            #   - Rep detection: per-window binary (0 or 1) - did a rep complete
+            #     in this window? Enables live counting by accumulating detections.
             #
-            # joint_data provides:
-            #   - Skeleton keypoints for visual verification
-            #   - Can be used to derive phases from movement patterns
-            #   - Velocity/position analysis for fatigue estimation
+            # joint_data.json (skeleton tracking, in combination with markers):
+            #   - Velocity-based fatigue estimation (compares current vs initial speed)
+            #   - Skeleton frames for visualization
+            #   - Fallback: time-based fatigue if joint_data unavailable
             #
-            # Note: joint_data is NOT used as model input (disabled in config)
+            # Neither markers.json nor joint_data.json are used as model input.
+            # They are ground truth only.
 
-            # Extract ground truth from joint_data (if available)
+            # --- Phase and rep count from markers.json ---
+            phase, rep_count = self._phase_and_reps_from_markers(
+                marker_list, window_start, window_end, exercise_type
+            )
+            window_data['phase'] = phase
+            window_data['rep_count'] = rep_count
+
+            # Skip windows with invalid phases (e.g. 'unknown', 'rest')
+            if phase not in ('eccentric', 'concentric'):
+                window_start += step_sec
+                window_idx += 1
+                continue
+
+            # --- Fatigue and skeleton from joint_data (ground truth + visualization) ---
             if session_data.get('joint_data'):
-                window_data['joint_features'] = self.joint_processor.extract_joint_features(
-                    session_data['joint_data'],
-                    window_start,
-                    window_end,
-                    exercise_type
-                )
-
-                # Extract skeleton frame for visualization (middle of window)
-                window_mid_time = (window_start + window_end) / 2
-                window_data['skeleton_frame'] = self.joint_processor.get_skeleton_frame(
-                    session_data['joint_data'],
-                    window_mid_time
-                )
-
-                # Detect phase from joint_data (rule-based or clustering)
-                window_data['phase'] = self.detect_phase(
-                    session_data['joint_data'],
-                    window_start,
-                    window_end,
-                    exercise_type
-                )
-
-                # Count repetitions from joint_data peaks (ground truth)
-                window_data['rep_count'] = self.joint_processor.count_reps_from_peaks(
-                    session_data['joint_data'],
-                    start_time,  # Count from exercise start
-                    window_end,  # Up to current window
-                    exercise_type
-                )
-
-                # Estimate fatigue from velocity degradation (ground truth)
                 window_data['fatigue_score'] = self.joint_processor.calculate_fatigue_from_velocity(
                     session_data['joint_data'],
                     window_end,
@@ -1346,21 +1436,20 @@ class DataPreprocessor:
                     exercise_type,
                     window_sec
                 )
-            else:
-                # Fallback: Use markers.json for rep counting
-                # Count non-'start' markers up to current window end
-                rep_count = sum(
-                    1 for m in marker_list
-                    if m.get('time', 0) <= window_end and m.get('label', '').lower() != 'start'
+
+                window_mid_time = (window_start + window_end) / 2
+                window_data['skeleton_frame'] = self.joint_processor.get_skeleton_frame(
+                    session_data['joint_data'],
+                    window_mid_time
                 )
-                window_data['rep_count'] = rep_count
-
-                # TODO: Extract phase labels from markers if annotated with phase info
-                # For now, phase remains 'unknown' without joint_data
-
-                # Fallback: Time-based fatigue estimation (simple progress metric)
-                progress = (window_start - start_time) / (end_time - start_time)
-                window_data['fatigue_score'] = progress
+            else:
+                # Fallback: time-based fatigue when joint_data unavailable
+                duration = end_time - start_time
+                if duration > 0:
+                    progress = (window_start - start_time) / duration
+                else:
+                    progress = 0.0
+                window_data['fatigue_score'] = min(1.0, max(0.0, progress))
 
             windows.append(window_data)
 
@@ -1468,26 +1557,30 @@ def preprocess_dataset_legacy(
         if not exercise_path.exists():
             continue
 
-        session_dirs = [
-            d for d in sorted(exercise_path.iterdir())
-            if d.is_dir() and d.name.isdigit()
-        ]
+        # Structure: Exercise / PersonNN / SetNN /
+        for person_dir in sorted(exercise_path.iterdir()):
+            if not person_dir.is_dir():
+                continue
 
-        for session_dir in session_dirs:
-            print(f"Processing {exercise}/{session_dir.name}...")
+            for set_dir in sorted(person_dir.iterdir()):
+                if not set_dir.is_dir():
+                    continue
 
-            # Preprocess session
-            session_data = preprocessor.preprocess_session(session_dir, exercise)
+                session_id = f"{person_dir.name}/{set_dir.name}"
+                print(f"Processing {exercise}/{session_id}...")
 
-            # Create windows
-            windows = preprocessor.create_windows(session_data, exercise)
+                # Preprocess session
+                session_data = preprocessor.preprocess_session(set_dir, exercise)
 
-            # Add exercise label to each window
-            for window in windows:
-                window['exercise'] = exercise
-                window['session_id'] = session_dir.name
+                # Create windows
+                windows = preprocessor.create_windows(session_data, exercise)
 
-            all_windows.extend(windows)
+                # Add exercise label to each window
+                for window in windows:
+                    window['exercise'] = exercise
+                    window['session_id'] = session_id
+
+                all_windows.extend(windows)
 
     print(f"Total windows created: {len(all_windows)}")
     return all_windows

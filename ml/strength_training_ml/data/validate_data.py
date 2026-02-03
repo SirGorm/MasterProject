@@ -126,24 +126,29 @@ class DataValidator:
                 self.global_warnings.append(f"Exercise folder not found: {exercise_name}")
                 continue
 
-            # Find session folders (numbered directories)
-            session_dirs = [
-                d for d in sorted(exercise_path.iterdir())
-                if d.is_dir() and d.name.isdigit()
-            ]
+            # Find sessions: Exercise / PersonNN / SetNN /
+            session_count = 0
+            for person_dir in sorted(exercise_path.iterdir()):
+                if not person_dir.is_dir():
+                    continue
 
-            if not session_dirs:
+                for set_dir in sorted(person_dir.iterdir()):
+                    if not set_dir.is_dir():
+                        continue
+
+                    session_id = f"{person_dir.name}/{set_dir.name}"
+                    self.sessions.append(SessionValidation(
+                        exercise=exercise_name,
+                        session_id=session_id,
+                        path=set_dir
+                    ))
+                    session_count += 1
+
+            if session_count == 0:
                 self.global_warnings.append(f"No sessions found for exercise: {exercise_name}")
                 continue
 
-            print(f"  {exercise_name}: {len(session_dirs)} sessions")
-
-            for session_dir in session_dirs:
-                self.sessions.append(SessionValidation(
-                    exercise=exercise_name,
-                    session_id=session_dir.name,
-                    path=session_dir
-                ))
+            print(f"  {exercise_name}: {session_count} sessions")
 
     def _validate_session(self, session: SessionValidation):
         """Validate a single session."""
@@ -222,17 +227,34 @@ class DataValidator:
             # Check for end marker or use last marker
             end_time = markers[-1].get('time', 0) if markers else 0
 
-            # Count repetitions (markers after start, excluding start itself)
-            rep_markers = [m for m in markers if m.get('time', 0) > start_time]
-            n_reps = len(rep_markers)
+            # Count intermediate markers (phase transitions between start and stop)
+            intermediate_markers = [m for m in markers
+                                    if m.get('time', 0) > start_time
+                                    and m.get('label', '').lower() not in ('start', 'stop')]
+            n_transitions = len(intermediate_markers)
+
+            # Need at least 1 intermediate marker for phase labels
+            # Pattern: start -[phase1]- M1 -[phase2]- M2 -[phase1]- ...
+            if n_transitions == 0:
+                session.results.append(ValidationResult(
+                    passed=True,
+                    message=f"WARNING: No intermediate markers - phase labels will be unknown. "
+                            f"Add markers at each phase transition for ground truth.",
+                    severity='warning'
+                ))
+
+            # Rep count = pairs of transitions (each rep has 2 phases)
+            n_reps = n_transitions // 2
 
             session.results.append(ValidationResult(
                 passed=True,
-                message=f"Markers valid: {n_reps} repetitions, duration {end_time - start_time:.1f}s",
+                message=f"Markers valid: {n_transitions} phase transitions, "
+                        f"{n_reps} complete reps, duration {end_time - start_time:.1f}s",
                 severity='info',
                 details={
                     'start_time': start_time,
                     'end_time': end_time,
+                    'n_transitions': n_transitions,
                     'n_reps': n_reps,
                     'duration': end_time - start_time
                 }

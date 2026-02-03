@@ -402,9 +402,8 @@ class StrengthTrainingModel(nn.Module):
 
         if not embeddings:
             # No signals available, return zeros
-            batch_size = 1
             device = next(self.parameters()).device
-            return torch.zeros(batch_size, self.config.model.fusion_dim, device=device)
+            return torch.zeros(1, self.config.model.fusion_dim, device=device)
 
         # Stack to [batch, n_signals, fusion_dim]
         key_value = torch.stack(embeddings, dim=1)
@@ -524,8 +523,8 @@ class MultiTaskLoss(nn.Module):
         # Compute individual losses
         loss_exercise = self.exercise_criterion(exercise_logits, exercise_labels)
         loss_phase = self.phase_criterion(phase_logits, phase_labels)
-        loss_reps = self.rep_criterion(rep_pred.squeeze(), rep_labels.float())
-        loss_fatigue = self.fatigue_criterion(fatigue_pred.squeeze(), fatigue_labels.float())
+        loss_reps = self.rep_criterion(rep_pred.squeeze(-1), rep_labels.float())
+        loss_fatigue = self.fatigue_criterion(fatigue_pred.squeeze(-1), fatigue_labels.float())
 
         if self.use_uncertainty_weighting:
             # Uncertainty weighting
@@ -534,10 +533,10 @@ class MultiTaskLoss(nn.Module):
             precision_reps = torch.exp(-self.log_vars['reps'])
             precision_fatigue = torch.exp(-self.log_vars['fatigue'])
 
-            weighted_loss_exercise = precision_exercise * loss_exercise + self.log_vars['exercise']
-            weighted_loss_phase = precision_phase * loss_phase + self.log_vars['phase']
-            weighted_loss_reps = precision_reps * loss_reps + self.log_vars['reps']
-            weighted_loss_fatigue = precision_fatigue * loss_fatigue + self.log_vars['fatigue']
+            weighted_loss_exercise = 0.5 * precision_exercise * loss_exercise + 0.5 * self.log_vars['exercise']
+            weighted_loss_phase = 0.5 * precision_phase * loss_phase + 0.5 * self.log_vars['phase']
+            weighted_loss_reps = 0.5 * precision_reps * loss_reps + 0.5 * self.log_vars['reps']
+            weighted_loss_fatigue = 0.5 * precision_fatigue * loss_fatigue + 0.5 * self.log_vars['fatigue']
 
             total_loss = weighted_loss_exercise + weighted_loss_phase + weighted_loss_reps + weighted_loss_fatigue
 

@@ -2,7 +2,7 @@
 Clustering-based Phase Detection for Strength Training.
 
 Uses unsupervised learning to automatically detect exercise phases
-(rest, concentric, eccentric) from joint kinematics.
+(concentric, eccentric) from joint kinematics.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ from config import CONFIG
 @dataclass
 class PhaseResult:
     """Result of phase detection for a window."""
-    phase: str                    # 'rest', 'concentric', 'eccentric'
+    phase: str                    #'concentric', 'eccentric'
     confidence: float             # 0-1 confidence score
     cluster_id: int               # Raw cluster ID
     features: np.ndarray          # Features used for clustering
@@ -87,6 +87,14 @@ class ClusteringPhaseDetector:
         'Pullups': {  # Alias
             'primary': ['ELBOW_RIGHT', 'ELBOW_LEFT', 'SHOULDER_RIGHT', 'SHOULDER_LEFT'],
             'secondary': ['WRIST_RIGHT', 'WRIST_LEFT', 'SPINE_NAVEL', 'SPINE_CHEST']
+        },
+        'Pullup': {  # Alias (folder name)
+            'primary': ['ELBOW_RIGHT', 'ELBOW_LEFT', 'SHOULDER_RIGHT', 'SHOULDER_LEFT'],
+            'secondary': ['WRIST_RIGHT', 'WRIST_LEFT', 'SPINE_NAVEL', 'SPINE_CHEST']
+        },
+        'Deadlift': {  # Alias
+            'primary': ['HIP_RIGHT', 'HIP_LEFT', 'KNEE_RIGHT', 'KNEE_LEFT'],
+            'secondary': ['PELVIS', 'SPINE_CHEST']
         }
     }
 
@@ -493,12 +501,18 @@ class ClusteringPhaseDetector:
         if hasattr(self.clusterer, 'predict'):
             cluster_id = self.clusterer.predict(features_scaled)[0]
         else:
-            # DBSCAN doesn't have predict, use nearest centroid
-            distances = np.linalg.norm(
-                features_scaled - self.clusterer.components_,
-                axis=1
-            )
-            cluster_id = np.argmin(distances)
+            # DBSCAN doesn't have predict, use nearest core sample
+            if hasattr(self.clusterer, 'components_') and len(self.clusterer.components_) > 0:
+                distances = np.linalg.norm(
+                    features_scaled - self.clusterer.components_,
+                    axis=1
+                )
+                nearest_core_idx = np.argmin(distances)
+                # Map core sample back to its cluster label
+                core_sample_indices = self.clusterer.core_sample_indices_
+                cluster_id = self.clusterer.labels_[core_sample_indices[nearest_core_idx]]
+            else:
+                cluster_id = 0  # fallback if no core samples
 
         # Get phase name
         phase = self.cluster_to_phase.get(cluster_id, 'unknown')

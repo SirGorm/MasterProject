@@ -12,13 +12,13 @@ USE_TIMESTAMP = True
 PAUSE_TIME = 0.05
 
 # --- Dataset selection ---
-# Update these paths to match your dataset location
+# Structure: data / exercise / person / recording_NNN /
 DATASET_ROOT = r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data"
-EXERCISE_NAME = "Squat"                              # None = all exercises
+EXERCISE_NAME = "Warmup"      # None = all exercises
+PERSON_NAME = "person1"       # None = all persons
 RECORDING_ID = "001"
-RECORDING_NAME = recording_folder_name(RECORDING_ID) # None = all recordings
+RECORDING_NAME = recording_folder_name(RECORDING_ID)  # None = all recordings
 
-       
 
 # Find chosen joint data
 json_files = []
@@ -31,18 +31,26 @@ for exercise in os.listdir(DATASET_ROOT):
     if not os.path.isdir(exercise_path):
         continue
 
-    for recording in os.listdir(exercise_path):
-        if RECORDING_NAME and recording != RECORDING_NAME:
+    for person in os.listdir(exercise_path):
+        if PERSON_NAME and person != PERSON_NAME:
             continue
 
-        recording_path = os.path.join(exercise_path, recording)
-        json_path = os.path.join(recording_path, "joint_data.json")
+        person_path = os.path.join(exercise_path, person)
+        if not os.path.isdir(person_path):
+            continue
 
-        if os.path.isfile(json_path):
-            json_files.append(json_path)
+        for recording in os.listdir(person_path):
+            if RECORDING_NAME and recording != RECORDING_NAME:
+                continue
+
+            recording_path = os.path.join(person_path, recording)
+            json_path = os.path.join(recording_path, "joint_data.json")
+
+            if os.path.isfile(json_path):
+                json_files.append(json_path)
 
 if not json_files:
-    raise RuntimeError("No joint_data.json for chosen participant or excersie")
+    raise RuntimeError("No joint_data.json found for chosen exercise/person/recording")
 
 print(f"Found {len(json_files)} files")
 
@@ -56,7 +64,7 @@ lines = o3d.geometry.LineSet()
 prev_timestamp = None
 geometry_added = False
 
-# --- Spill av alle funnede filer ---
+# --- Play back all found files ---
 for file_path in json_files:
 
     print(f"\nPlayback of file: {file_path}")
@@ -110,6 +118,3 @@ for file_path in json_files:
             time.sleep(PAUSE_TIME)
 
 vis.destroy_window()
-
-
-
