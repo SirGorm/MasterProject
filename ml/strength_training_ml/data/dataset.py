@@ -22,6 +22,39 @@ from config import CONFIG, SIGNALS, TASK_SIGNALS
 from data.preprocessing import DataPreprocessor, preprocess_dataset
 
 
+def custom_collate_fn(batch):
+    """
+    Custom collate function that handles both tensors and metadata.
+
+    Separates tensor targets from string metadata for proper batching.
+    """
+    signals_list = [item[0] for item in batch]
+    targets_list = [item[1] for item in batch]
+
+    # Collate signals (all tensors)
+    collated_signals = {}
+    for key in signals_list[0].keys():
+        collated_signals[key] = torch.stack([s[key] for s in signals_list])
+
+    # Separate tensor targets from metadata
+    tensor_keys = ['exercise', 'phase', 'reps', 'fatigue']
+    metadata_keys = ['session_id', 'exercise_name', 'window_idx', 'start_time', 'end_time', 'phase_name', 'skeleton_frame']
+
+    collated_targets = {}
+
+    # Stack tensor targets
+    for key in tensor_keys:
+        if key in targets_list[0]:
+            collated_targets[key] = torch.stack([t[key] for t in targets_list])
+
+    # Collect metadata as lists
+    for key in metadata_keys:
+        if key in targets_list[0]:
+            collated_targets[key] = [t[key] for t in targets_list]
+
+    return collated_signals, collated_targets
+
+
 class StrengthTrainingDataset(Dataset):
     """
     PyTorch Dataset for strength training analysis.
@@ -156,7 +189,15 @@ class StrengthTrainingDataset(Dataset):
             'exercise': torch.LongTensor([exercise_label]).squeeze(),
             'phase': torch.LongTensor([phase_label]).squeeze(),
             'reps': torch.FloatTensor([rep_count]).squeeze(),
-            'fatigue': torch.FloatTensor([fatigue_score]).squeeze()
+            'fatigue': torch.FloatTensor([fatigue_score]).squeeze(),
+            # Metadata for tracking (not used in training, but useful for analysis)
+            'session_id': window.get('session_id', 'unknown'),
+            'exercise_name': window.get('exercise', 'unknown'),
+            'window_idx': window.get('window_idx', idx),
+            'start_time': window.get('start_time', 0.0),
+            'end_time': window.get('end_time', 0.0),
+            'phase_name': phase_str if phase_str else 'unknown',
+            'skeleton_frame': window.get('skeleton_frame', None)  # For visualization
         }
 
         return signals_dict, targets_dict
@@ -282,12 +323,16 @@ def create_dataloaders(
     print(f"  Phases:    {train_dist['phase']}")
 
     # Create dataloaders
+    # Only use pin_memory if GPU is available (avoids warning on CPU-only systems)
+    use_pin_memory = torch.cuda.is_available()
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=use_pin_memory,
+        collate_fn=custom_collate_fn
     )
 
     val_loader = DataLoader(
@@ -295,7 +340,8 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=use_pin_memory,
+        collate_fn=custom_collate_fn
     )
 
     print(f"\nBatch size: {batch_size}")

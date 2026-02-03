@@ -416,6 +416,37 @@ class JointProcessor:
     def __init__(self, config=None):
         self.config = config or CONFIG
 
+    # Bone connections for skeleton visualization (Azure Kinect)
+    BONE_CONNECTIONS = [
+        # Spine
+        ('PELVIS', 'SPINE_NAVEL'),
+        ('SPINE_NAVEL', 'SPINE_CHEST'),
+        ('SPINE_CHEST', 'NECK'),
+        ('NECK', 'HEAD'),
+        # Left arm
+        ('SPINE_CHEST', 'CLAVICLE_LEFT'),
+        ('CLAVICLE_LEFT', 'SHOULDER_LEFT'),
+        ('SHOULDER_LEFT', 'ELBOW_LEFT'),
+        ('ELBOW_LEFT', 'WRIST_LEFT'),
+        ('WRIST_LEFT', 'HAND_LEFT'),
+        # Right arm
+        ('SPINE_CHEST', 'CLAVICLE_RIGHT'),
+        ('CLAVICLE_RIGHT', 'SHOULDER_RIGHT'),
+        ('SHOULDER_RIGHT', 'ELBOW_RIGHT'),
+        ('ELBOW_RIGHT', 'WRIST_RIGHT'),
+        ('WRIST_RIGHT', 'HAND_RIGHT'),
+        # Left leg
+        ('PELVIS', 'HIP_LEFT'),
+        ('HIP_LEFT', 'KNEE_LEFT'),
+        ('KNEE_LEFT', 'ANKLE_LEFT'),
+        ('ANKLE_LEFT', 'FOOT_LEFT'),
+        # Right leg
+        ('PELVIS', 'HIP_RIGHT'),
+        ('HIP_RIGHT', 'KNEE_RIGHT'),
+        ('KNEE_RIGHT', 'ANKLE_RIGHT'),
+        ('ANKLE_RIGHT', 'FOOT_RIGHT'),
+    ]
+
     def load_joint_data(self, joint_path: Path) -> Optional[Dict]:
         """
         Load joint data from JSON file.
@@ -433,6 +464,78 @@ class JointProcessor:
         except Exception as e:
             print(f"Error loading joint data: {e}")
             return None
+
+    def get_skeleton_frame(
+        self,
+        joint_data: Dict,
+        target_time: float
+    ) -> Optional[Dict]:
+        """
+        Get a single skeleton frame closest to the target time.
+
+        Args:
+            joint_data: Loaded joint data dictionary
+            target_time: Target time in seconds (relative to start)
+
+        Returns:
+            Dictionary with joint positions and bone connections for visualization
+        """
+        frames = joint_data.get('frames', [])
+
+        if not frames:
+            return None
+
+        # Convert absolute timestamps to relative time
+        first_timestamp = frames[0].get('timestamp_usec', 0)
+
+        # Find frame closest to target time
+        closest_frame = None
+        min_diff = float('inf')
+
+        for frame in frames:
+            abs_timestamp = frame.get('timestamp_usec', 0)
+            rel_time = (abs_timestamp - first_timestamp) / 1e6
+
+            diff = abs(rel_time - target_time)
+            if diff < min_diff:
+                min_diff = diff
+                closest_frame = frame
+
+        if closest_frame is None:
+            return None
+
+        # Extract joint positions
+        bodies = closest_frame.get('bodies', [])
+        if not bodies:
+            return None
+
+        body = bodies[0]  # Use first detected body
+        joint_positions = body.get('joint_positions', [])
+
+        if not joint_positions or len(joint_positions) < len(self.JOINT_NAMES):
+            return None
+
+        # Create Nx3 numpy array for visualization
+        joints_array = np.zeros((len(self.JOINT_NAMES), 3))
+        for i, name in enumerate(self.JOINT_NAMES):
+            if i < len(joint_positions):
+                joints_array[i, 0] = joint_positions[i][0]  # x
+                joints_array[i, 1] = joint_positions[i][1]  # y
+                joints_array[i, 2] = joint_positions[i][2] if len(joint_positions[i]) > 2 else 0  # z
+
+        # Convert bone connections from names to indices
+        name_to_idx = {name: i for i, name in enumerate(self.JOINT_NAMES)}
+        bone_indices = []
+        for start_name, end_name in self.BONE_CONNECTIONS:
+            if start_name in name_to_idx and end_name in name_to_idx:
+                bone_indices.append((name_to_idx[start_name], name_to_idx[end_name]))
+
+        return {
+            'joints': joints_array,  # Nx3 numpy array
+            'joint_names': self.JOINT_NAMES,
+            'bone_connections': bone_indices,  # List of (start_idx, end_idx) tuples
+            'timestamp': target_time
+        }
 
     def extract_joint_features(
         self,
@@ -811,6 +914,165 @@ class DataPreprocessor:
         self.signal_processor = SignalPreprocessor(config)
         self.joint_processor = JointProcessor(config)
 
+        # Clustering-based phase detector (lazy initialization)
+        self._phase_detector = None
+        self._phase_detector_initialized = False
+
+    def _get_phase_detector(self):
+        """Get or initialize the clustering-based phase detector."""
+        if self._phase_detector_initialized:
+            return self._phase_detector
+
+        # Check if clustering method is configured
+        if not hasattr(self.config, 'phase_detection') or \
+           self.config.phase_detection.method != 'clustering':
+            self._phase_detector_initialized = True
+            return None
+
+        from .phase_clustering import ClusteringPhaseDetector
+
+        # Try to load pre-trained model
+        if self.config.phase_detection.pretrained_model_path:
+            model_path = Path(self.config.phase_detection.pretrained_model_path)
+            if model_path.exists():
+                self._phase_detector = ClusteringPhaseDetector(
+                    n_clusters=self.config.phase_detection.n_clusters,
+                    use_dbscan=self.config.phase_detection.use_dbscan,
+                    smoothing_window=self.config.phase_detection.smoothing_window,
+                    velocity_threshold=self.config.phase_detection.velocity_threshold
+                )
+                self._phase_detector.load(model_path)
+                print(f"Loaded clustering phase detector from {model_path}")
+                self._phase_detector_initialized = True
+                return self._phase_detector
+
+        # No pre-trained model - will need to be trained
+        self._phase_detector = ClusteringPhaseDetector(
+            n_clusters=self.config.phase_detection.n_clusters,
+            use_dbscan=self.config.phase_detection.use_dbscan,
+            smoothing_window=self.config.phase_detection.smoothing_window,
+            velocity_threshold=self.config.phase_detection.velocity_threshold
+        )
+        self._phase_detector_initialized = True
+        return self._phase_detector
+
+    def detect_phase(
+        self,
+        joint_data: Dict,
+        start_time: float,
+        end_time: float,
+        exercise_type: str
+    ) -> str:
+        """
+        Detect phase using configured method (rule-based or clustering).
+
+        Args:
+            joint_data: Joint data dictionary
+            start_time: Window start time
+            end_time: Window end time
+            exercise_type: Type of exercise
+
+        Returns:
+            Phase label: 'eccentric', 'concentric', 'rest', or 'unknown'
+        """
+        # Check if we should use clustering
+        phase_detector = self._get_phase_detector()
+
+        if phase_detector is not None and phase_detector.is_fitted:
+            # Use clustering-based detection
+            return phase_detector.predict_phase(
+                joint_data, start_time, end_time, exercise_type
+            )
+
+        # Fall back to rule-based detection
+        return self.joint_processor.detect_phase(
+            joint_data, start_time, end_time, exercise_type
+        )
+
+    def train_phase_detector(
+        self,
+        valid_sessions: List[Tuple[str, str, Path]]
+    ) -> bool:
+        """
+        Train the clustering-based phase detector on valid sessions.
+
+        Args:
+            valid_sessions: List of (exercise, session_id, path) tuples
+
+        Returns:
+            True if training successful, False otherwise
+        """
+        phase_detector = self._get_phase_detector()
+        if phase_detector is None:
+            print("Phase detection not configured for clustering mode")
+            return False
+
+        if phase_detector.is_fitted:
+            print("Phase detector already trained")
+            return True
+
+        if not hasattr(self.config, 'phase_detection') or \
+           not self.config.phase_detection.auto_train:
+            print("Auto-training disabled for phase detector")
+            return False
+
+        print("\nTraining clustering-based phase detector...")
+
+        all_features = []
+        window_sec = self.config.data.time_window_sec
+        window_stride = window_sec * (1 - self.config.data.overlap)
+
+        for exercise, session_id, session_path in valid_sessions:
+            # Load joint data
+            joint_path = session_path / self.config.data.joints_file
+            if not joint_path.exists():
+                continue
+
+            joint_data = self.joint_processor.load_joint_data(joint_path)
+            if not joint_data:
+                continue
+
+            frames = joint_data.get('frames', [])
+            if len(frames) < 2:
+                continue
+
+            # Get time range
+            first_ts = frames[0].get('timestamp_usec', 0)
+            last_ts = frames[-1].get('timestamp_usec', 0)
+            duration = (last_ts - first_ts) / 1e6
+
+            # Extract features for windows
+            n_windows = int((duration - window_sec) / window_stride) + 1
+
+            for i in range(n_windows):
+                start_time = i * window_stride
+                end_time = start_time + window_sec
+
+                features = phase_detector.extract_features(
+                    joint_data, start_time, end_time, exercise
+                )
+
+                if np.any(features):
+                    all_features.append(features)
+
+        if len(all_features) < phase_detector.n_clusters:
+            print(f"Not enough features for training: {len(all_features)}")
+            return False
+
+        all_features = np.array(all_features)
+        print(f"Extracted {len(all_features)} feature vectors from {len(valid_sessions)} sessions")
+
+        # Fit the detector
+        phase_detector.fit(all_features)
+
+        # Save if configured
+        if self.config.phase_detection.save_trained_model:
+            save_path = self.config.output.output_dir / "phase_detector.pkl"
+            phase_detector.save(save_path)
+
+        print("Phase detector training complete!")
+        return True
+
     def preprocess_session(
         self,
         session_path: Path,
@@ -995,6 +1257,7 @@ class DataPreprocessor:
                 'end_time': window_end,
                 'signals': {},
                 'joint_features': None,
+                'skeleton_frame': None,  # For visualization
                 'phase': 'unknown',
                 'rep_count': 0,
                 'fatigue_score': 0.0
@@ -1052,8 +1315,15 @@ class DataPreprocessor:
                     exercise_type
                 )
 
-                # Detect phase from joint_data kinematics (ground truth)
-                window_data['phase'] = self.joint_processor.detect_phase(
+                # Extract skeleton frame for visualization (middle of window)
+                window_mid_time = (window_start + window_end) / 2
+                window_data['skeleton_frame'] = self.joint_processor.get_skeleton_frame(
+                    session_data['joint_data'],
+                    window_mid_time
+                )
+
+                # Detect phase from joint_data (rule-based or clustering)
+                window_data['phase'] = self.detect_phase(
                     session_data['joint_data'],
                     window_start,
                     window_end,
@@ -1135,6 +1405,11 @@ def preprocess_dataset(
     print(f"\nProcessing {len(valid_sessions)} valid sessions...")
 
     preprocessor = DataPreprocessor(config)
+
+    # Train clustering phase detector if configured
+    if hasattr(config, 'phase_detection') and config.phase_detection.method == 'clustering':
+        preprocessor.train_phase_detector(valid_sessions)
+
     all_windows = []
 
     # Group sessions by exercise for organized processing

@@ -18,6 +18,12 @@ from .preprocessing import (
     ExtractedFeatures,
 )
 
+from .phase_clustering import (
+    ClusteringPhaseDetector,
+    PhaseResult,
+    train_phase_detector,
+)
+
 __all__ = [
     # Validation
     'DataValidator',
@@ -32,4 +38,9 @@ __all__ = [
     'preprocess_dataset',
     'WindowedSignal',
     'ExtractedFeatures',
+
+    # Phase Detection
+    'ClusteringPhaseDetector',
+    'PhaseResult',
+    'train_phase_detector',
 ]

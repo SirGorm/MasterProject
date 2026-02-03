@@ -22,7 +22,8 @@ import json
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
 # Dataset path - CHANGE THIS to your dataset location
-DATASET_PATH = Path(r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data")
+#DATASET_PATH = Path(r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data") #skole
+DATASET_PATH = Path(r"C:\MasterProject\VS_Camera\Test_modify\dataset") # hjemme
 
 # Output directories
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -312,6 +313,49 @@ class EvaluationConfig:
 
 
 # =============================================================================
+# PREDICTION TRACKING CONFIGURATION
+# =============================================================================
+
+@dataclass
+class TrackingConfig:
+    """Configuration for prediction tracking during training/evaluation."""
+
+    # Enable/disable tracking
+    enabled: bool = True
+
+    # Number of random windows to sample and save per epoch
+    # Set to 0 to track all windows (uses more memory)
+    n_samples_per_epoch: int = 50
+
+    # Store options
+    store_signals: bool = True      # Store input signal data
+    store_logits: bool = True       # Store prediction probabilities
+    max_records: int = 5000         # Maximum records to keep in memory
+
+    # Which splits to track
+    track_train: bool = False       # Track training samples
+    track_val: bool = True          # Track validation samples
+    track_test: bool = True         # Track test samples
+
+    # Auto-save settings
+    auto_save: bool = True          # Auto-save after training
+    save_visualizations: bool = True  # Save visualizations of random samples
+    n_visualizations: int = 10      # Number of visualizations to generate
+
+    # Visualization selection mode
+    # 'random': Select random windows (uses n_visualizations)
+    # 'specific': Use specific_window_indices list
+    visualization_mode: str = 'specific'
+
+    # List of specific window indices to visualize (used when visualization_mode='specific')
+    # Example: [0, 1, 2, 3, 4, 5] or [10, 20, 30]
+    specific_window_indices: List[int] = field(default_factory=lambda: [10, 11, 12, 13, 14, 15])
+
+    # Output directory (relative to output_dir)
+    tracking_subdir: str = "prediction_tracking"
+
+
+# =============================================================================
 # OUTPUT CONFIGURATION
 # =============================================================================
 
@@ -343,6 +387,34 @@ class OutputConfig:
         for dir_path in [self.output_dir, self.logs_dir, self.results_dir,
                          self.plots_dir, self.models_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
+
+
+# =============================================================================
+# PHASE DETECTION CONFIGURATION
+# =============================================================================
+
+@dataclass
+class PhaseDetectionConfig:
+    """Configuration for phase detection (rule-based vs clustering-based)."""
+
+    # Detection method: 'rule_based' or 'clustering'
+    method: str = 'clustering'
+
+    # Clustering settings (used when method='clustering')
+    n_clusters: int = 3                    # Number of clusters (rest, concentric, eccentric)
+    use_dbscan: bool = False               # Use DBSCAN instead of K-Means
+    smoothing_window: int = 5              # Window size for velocity smoothing
+    velocity_threshold: float = 0.01       # Threshold for rest detection
+
+    # Pre-trained model path (optional - if not set, trains on the fly)
+    pretrained_model_path: Optional[str] = None
+
+    # Auto-train settings
+    auto_train: bool = True                # Auto-train if no model exists
+    save_trained_model: bool = True        # Save model after training
+
+    # Phase names
+    phases: List[str] = field(default_factory=lambda: ['rest', 'concentric', 'eccentric'])
 
 
 # =============================================================================
@@ -385,6 +457,8 @@ class Config:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     fatigue: FatigueConfig = field(default_factory=FatigueConfig)
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    phase_detection: PhaseDetectionConfig = field(default_factory=PhaseDetectionConfig)
 
     # Signal configurations (copied from module level)
     signals: Dict[str, SignalConfig] = field(default_factory=lambda: SIGNALS.copy())
@@ -464,7 +538,7 @@ class Config:
 
         result = {}
         for field_name in ['data', 'model', 'training', 'preprocessing',
-                          'evaluation', 'output', 'fatigue']:
+                          'evaluation', 'output', 'fatigue', 'tracking', 'phase_detection']:
             field_value = getattr(self, field_name)
             result[field_name] = asdict(field_value)
             # Convert Path objects
@@ -541,6 +615,12 @@ class Config:
         print(f"  Epochs: {self.training.n_epochs}")
         print(f"  Early stopping: {self.training.early_stopping_patience}")
         print(f"  Device: {self.get_device()}")
+
+        print(f"\nPhase Detection:")
+        print(f"  Method: {self.phase_detection.method}")
+        if self.phase_detection.method == 'clustering':
+            print(f"  Clusters: {self.phase_detection.n_clusters}")
+            print(f"  Algorithm: {'DBSCAN' if self.phase_detection.use_dbscan else 'K-Means'}")
 
         print("="*70)
 

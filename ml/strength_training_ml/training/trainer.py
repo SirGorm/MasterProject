@@ -7,6 +7,7 @@ Features:
 - GPU support
 - Gradient clipping for stability
 - Comprehensive logging
+- Prediction tracking for debugging and analysis
 """
 
 import torch
@@ -15,9 +16,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List
 import json
 import time
+import random
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import CONFIG
 from models import StrengthTrainingModel, MultiTaskLoss, create_model
 from utils import get_logger, TrainingLogger
+from evaluation import PredictionTracker, visualize_prediction, visualize_prediction_with_skeleton
 
 
 class Trainer:
@@ -96,6 +99,18 @@ class Trainer:
             'val_fatigue_mae': [],
             'learning_rates': []
         }
+
+        # Setup prediction tracker
+        self.tracker = None
+        if self.config.tracking.enabled:
+            tracking_dir = self.config.output.output_dir / self.config.tracking.tracking_subdir
+            self.tracker = PredictionTracker(
+                output_dir=tracking_dir,
+                max_records=self.config.tracking.max_records,
+                store_signals=self.config.tracking.store_signals,
+                store_logits=self.config.tracking.store_logits
+            )
+            self.logger.info(f"Prediction tracking enabled: {tracking_dir}")
 
     def _create_optimizer(self) -> optim.Optimizer:
         """Create optimizer based on config."""
@@ -276,9 +291,12 @@ class Trainer:
         return metrics
 
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
+    def validate(self, track_predictions: bool = True) -> Dict[str, float]:
         """
         Validate the model.
+
+        Args:
+            track_predictions: Whether to track predictions this epoch
 
         Returns:
             Dictionary of validation metrics
@@ -292,7 +310,10 @@ class Trainer:
         total_rep_mae = 0.0
         total_fatigue_mae = 0.0
 
-        for signals, targets in self.val_loader:
+        # Collect batches for random sampling
+        all_batches = []
+
+        for batch_idx, (signals, targets) in enumerate(self.val_loader):
             # Move to device
             signals = {k: v.to(self.device) for k, v in signals.items()}
             exercise_labels = targets['exercise'].to(self.device)
@@ -328,9 +349,46 @@ class Trainer:
                 # Fatigue MAE
                 total_fatigue_mae += torch.abs(fatigue_pred.squeeze() - fatigue_labels.float()).sum().item()
 
+                # Collect batch for tracking
+                if track_predictions and self.tracker and self.config.tracking.track_val:
+                    # Extract metadata from targets (lists of strings/values)
+                    batch_size = exercise_labels.size(0)
+                    metadata_list = []
+                    for i in range(batch_size):
+                        metadata_list.append({
+                            'session_id': targets.get('session_id', ['unknown'] * batch_size)[i],
+                            'exercise': targets.get('exercise_name', ['unknown'] * batch_size)[i],
+                            'window_idx': targets.get('window_idx', [0] * batch_size)[i],
+                            'start_time': targets.get('start_time', [0.0] * batch_size)[i],
+                            'end_time': targets.get('end_time', [0.0] * batch_size)[i],
+                            'skeleton_frame': targets.get('skeleton_frame', [None] * batch_size)[i],
+                        })
+
+                    all_batches.append({
+                        'signals': {k: v.clone() for k, v in signals.items()},
+                        'predictions': (
+                            exercise_logits.clone(),
+                            phase_logits.clone(),
+                            rep_pred.clone(),
+                            fatigue_pred.clone()
+                        ),
+                        'targets': {
+                            'exercise': exercise_labels.clone(),
+                            'phase': phase_labels.clone(),
+                            'reps': rep_labels.clone(),
+                            'fatigue': fatigue_labels.clone()
+                        },
+                        'metadata': metadata_list,
+                        'batch_idx': batch_idx
+                    })
+
             except Exception as e:
                 self.logger.error(f"Validation error: {e}")
                 continue
+
+        # Track random samples from validation
+        if track_predictions and self.tracker and self.config.tracking.track_val and all_batches:
+            self._track_random_samples(all_batches, split='val')
 
         if total_samples == 0:
             return {'loss': 0, 'exercise_acc': 0, 'phase_acc': 0, 'rep_mae': 0, 'fatigue_mae': 0}
@@ -345,6 +403,77 @@ class Trainer:
         }
 
         return metrics
+
+    def _track_random_samples(self, all_batches: List[Dict], split: str = 'val'):
+        """
+        Track random samples from collected batches.
+
+        Args:
+            all_batches: List of batch dictionaries with signals, predictions, targets
+            split: Data split ('train', 'val', 'test')
+        """
+        n_samples = self.config.tracking.n_samples_per_epoch
+
+        # If n_samples is 0, track all samples
+        if n_samples == 0:
+            # Convert all batches to individual samples with metadata
+            batches_to_track = []
+            for batch in all_batches:
+                batch_size = batch['targets']['exercise'].size(0)
+                for idx in range(batch_size):
+                    single_batch = {
+                        'signals': {k: v[idx:idx+1] for k, v in batch['signals'].items()},
+                        'predictions': tuple(p[idx:idx+1] for p in batch['predictions']),
+                        'targets': {k: v[idx:idx+1] for k, v in batch['targets'].items()},
+                        'metadata': [batch['metadata'][idx]] if 'metadata' in batch else None,
+                        'batch_idx': batch['batch_idx']
+                    }
+                    batches_to_track.append(single_batch)
+        else:
+            # Calculate total samples available
+            total_available = sum(
+                batch['targets']['exercise'].size(0) for batch in all_batches
+            )
+
+            # Limit n_samples to available samples
+            n_samples = min(n_samples, total_available)
+
+            # Randomly select which batches and indices to track
+            sample_indices = []
+            current_idx = 0
+            for batch in all_batches:
+                batch_size = batch['targets']['exercise'].size(0)
+                for i in range(batch_size):
+                    sample_indices.append((batch, i))
+                current_idx += batch_size
+
+            # Random selection
+            selected = random.sample(sample_indices, n_samples)
+
+            # Group by batch for efficient tracking
+            batches_to_track = []
+            for batch, idx in selected:
+                # Create single-sample batch
+                single_batch = {
+                    'signals': {k: v[idx:idx+1] for k, v in batch['signals'].items()},
+                    'predictions': tuple(p[idx:idx+1] for p in batch['predictions']),
+                    'targets': {k: v[idx:idx+1] for k, v in batch['targets'].items()},
+                    'metadata': [batch['metadata'][idx]] if 'metadata' in batch else None,
+                    'batch_idx': batch['batch_idx']
+                }
+                batches_to_track.append(single_batch)
+
+        # Track the selected batches
+        for batch in batches_to_track:
+            self.tracker.track_batch(
+                signals=batch['signals'],
+                predictions=batch['predictions'],
+                targets=batch['targets'],
+                metadata=batch.get('metadata'),
+                epoch=self.current_epoch,
+                batch_idx=batch['batch_idx'],
+                split=split
+            )
 
     def train(self) -> Dict[str, Any]:
         """
@@ -433,14 +562,174 @@ class Trainer:
         self.logger.info(f"Total time: {total_time/60:.1f} minutes")
         self.logger.info(f"Best validation loss: {self.best_val_loss:.4f}")
         self.logger.info(f"Model saved to: {save_path}")
+
+        # Save tracked predictions
+        tracking_save_path = None
+        if self.tracker and self.config.tracking.auto_save:
+            tracking_save_path = self._save_tracking_data()
+
         self.logger.info("="*70)
 
         return {
             'history': self.history,
             'best_val_loss': self.best_val_loss,
             'final_epoch': self.current_epoch,
-            'save_path': str(save_path)
+            'save_path': str(save_path),
+            'tracking_save_path': tracking_save_path
         }
+
+    def _save_tracking_data(self) -> Optional[str]:
+        """
+        Save tracked predictions and generate visualizations.
+
+        Returns:
+            Path to saved tracking data
+        """
+        if not self.tracker:
+            return None
+
+        # Save tracking data
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"training_predictions_{timestamp}"
+        self.tracker.save(filename)
+
+        # Log statistics
+        stats = self.tracker.get_statistics()
+        self.logger.info("\n" + "="*50)
+        self.logger.info("PREDICTION TRACKING SUMMARY")
+        self.logger.info("="*50)
+        self.logger.info(f"Total tracked predictions: {stats['total_predictions']}")
+        self.logger.info(f"Exercise accuracy: {stats['exercise_accuracy']:.2%}")
+        self.logger.info(f"Phase accuracy: {stats['phase_accuracy']:.2%}")
+        self.logger.info(f"Reps MAE: {stats['reps_mae']:.2f}")
+        self.logger.info(f"Fatigue MAE: {stats['fatigue_mae']:.3f}")
+
+        # Generate visualizations if enabled
+        if self.config.tracking.save_visualizations:
+            self._generate_visualizations()
+
+        return str(self.tracker.output_dir / filename)
+
+    def _generate_visualizations(self, window_indices: List[int] = None):
+        """
+        Generate visualizations for tracked samples.
+
+        Args:
+            window_indices: Optional list of specific window indices to visualize.
+                          If None, uses config settings (random or specific mode).
+        """
+        if not self.tracker:
+            return
+
+        records = self.tracker.records
+
+        if not records:
+            return
+
+        # Create visualizations directory
+        vis_dir = self.tracker.output_dir / "visualizations"
+        vis_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine which records to visualize
+        if window_indices is not None:
+            # Use provided window indices
+            selected_records = [
+                r for r in records if r.window_idx in window_indices
+            ]
+            mode_info = f"specific windows: {window_indices}"
+        elif self.config.tracking.visualization_mode == 'specific':
+            # Use specific indices from config
+            specific_indices = self.config.tracking.specific_window_indices
+            if not specific_indices:
+                self.logger.warning("visualization_mode='specific' but no specific_window_indices provided")
+                return
+            selected_records = [
+                r for r in records if r.window_idx in specific_indices
+            ]
+            mode_info = f"specific windows from config: {specific_indices}"
+        else:
+            # Random mode (default)
+            n_vis = self.config.tracking.n_visualizations
+            n_vis = min(n_vis, len(records))
+            selected_records = random.sample(records, n_vis)
+            mode_info = f"random ({n_vis} samples)"
+
+        if not selected_records:
+            self.logger.warning("No records found matching the specified window indices")
+            return
+
+        self.logger.info(f"\nGenerating visualizations ({mode_info})...")
+        self.logger.info(f"Found {len(selected_records)} records to visualize")
+
+        for i, record in enumerate(selected_records):
+            record_dict = self.tracker.get_window_with_prediction(record.record_id)
+            if record_dict:
+                # Create subfolder for each window_idx
+                window_dir = vis_dir / f"window_{record.window_idx}"
+                window_dir.mkdir(parents=True, exist_ok=True)
+                output_path = window_dir / f"record_{record.record_id}.png"
+                try:
+                    # Use skeleton visualization if skeleton data is available
+                    if record_dict.get('skeleton_frame') is not None:
+                        visualize_prediction_with_skeleton(
+                            record_dict, output_path=output_path, show=False
+                        )
+                    else:
+                        visualize_prediction(record_dict, output_path=output_path, show=False)
+                except Exception as e:
+                    self.logger.warning(f"Failed to generate visualization {i+1}: {e}")
+
+        # Generate error analysis visualizations
+        self._generate_error_visualizations(vis_dir)
+
+        self.logger.info(f"Visualizations saved to: {vis_dir}")
+
+    def _generate_error_visualizations(self, vis_dir: Path):
+        """Generate visualizations for incorrectly predicted samples."""
+        if not self.tracker:
+            return
+
+        # Get incorrect phase predictions
+        incorrect_phase = self.tracker.get_records(incorrect_only=True, task='phase')
+
+        if incorrect_phase:
+            n_errors = min(5, len(incorrect_phase))
+            self.logger.info(f"Generating {n_errors} error visualizations for phase detection...")
+
+            # Create errors subfolder
+            errors_dir = vis_dir / "phase_errors"
+            errors_dir.mkdir(parents=True, exist_ok=True)
+
+            for i, record in enumerate(incorrect_phase[:n_errors]):
+                record_dict = self.tracker.get_window_with_prediction(record.record_id)
+                if record_dict:
+                    # Group by window_idx
+                    window_dir = errors_dir / f"window_{record.window_idx}"
+                    window_dir.mkdir(parents=True, exist_ok=True)
+                    output_path = window_dir / f"record_{record.record_id}.png"
+                    try:
+                        # Use skeleton visualization if skeleton data is available
+                        if record_dict.get('skeleton_frame') is not None:
+                            visualize_prediction_with_skeleton(
+                                record_dict, output_path=output_path, show=False
+                            )
+                        else:
+                            visualize_prediction(record_dict, output_path=output_path, show=False)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to generate error visualization: {e}")
+
+        # Save error analysis summary
+        error_analysis = self.tracker.get_error_analysis(task='phase')
+        errors_dir = vis_dir / "phase_errors"
+        errors_dir.mkdir(parents=True, exist_ok=True)
+        analysis_path = errors_dir / "error_analysis.json"
+        with open(analysis_path, 'w') as f:
+            # Convert tuple keys to strings for JSON serialization
+            serializable_analysis = {
+                k: v if k != 'confusion_matrix' else {str(ck): cv for ck, cv in v.items()}
+                for k, v in error_analysis.items()
+            }
+            json.dump(serializable_analysis, f, indent=2)
 
     def _save_checkpoint(
         self,
