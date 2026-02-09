@@ -1,0 +1,19 @@
+"""Configuration module for Strength Training ML Pipeline v2."""
+
+from .settings import (
+    Config, CONFIG, get_config, set_epochs,
+    SignalConfig, DataConfig, ModelConfig, TrainingConfig,
+    PreprocessingConfig, EvaluationConfig, OutputConfig,
+    FatigueConfig, TrackingConfig,
+    SIGNALS, TASK_SIGNALS,
+    PROJECT_ROOT, DATASET_PATH, OUTPUT_DIR, LOGS_DIR, RESULTS_DIR, PLOTS_DIR, MODELS_DIR,
+)
+
+__all__ = [
+    'Config', 'CONFIG', 'get_config', 'set_epochs',
+    'SignalConfig', 'DataConfig', 'ModelConfig', 'TrainingConfig',
+    'PreprocessingConfig', 'EvaluationConfig', 'OutputConfig',
+    'FatigueConfig', 'TrackingConfig',
+    'SIGNALS', 'TASK_SIGNALS',
+    'PROJECT_ROOT', 'DATASET_PATH', 'OUTPUT_DIR', 'LOGS_DIR', 'RESULTS_DIR', 'PLOTS_DIR', 'MODELS_DIR',
+]
