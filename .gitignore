@@ -1,7 +1,39 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.exe
-nul
-.claude/
-ml/strength_training_ml/output/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+lightning_logs/
+mlruns/
+
+# Output
+ml/output/
+*.pkl
+*.pth
+*.ckpt
+
+# Data (large files)
+*.mkv
+*.mp4
+*.avi
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.bak

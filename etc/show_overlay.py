@@ -1,39 +1,111 @@
+"""
+Show skeleton overlay on video from dataset.
+Usage example:
+
+python show_overlay.py -ex (Excersice) -p (person id) -s (set id) -d (dataset root / optional)
+"""
 import os
 import cv2
 import json
 import numpy as np
+import re
+import argparse
 
-# --- Dataset selection ---
-# Structure: data / exercise / person / recording_NNN /
-DATASET_ROOT = r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data"
-EXERCISE_NAME = "Warmup"
-PERSON_NAME = "person1"
-RECORDING_ID = "001"
 
-def recording_folder_name(rec_id):
-    return f"recording_{int(rec_id):03d}"
 
-# Build path: data / exercise / person / recording_NNN /
-recording_folder = os.path.join(
-    DATASET_ROOT, EXERCISE_NAME, PERSON_NAME, recording_folder_name(RECORDING_ID)
-)
 
-# Find the .mkv video file inside the recording folder
+def parse_args():
+    parser = argparse.ArgumentParser(description="Show skeleton overlay on video")
+    parser.add_argument(
+        "-ex", "--exercise",
+        type=str,
+        required=True,
+        help="Exercise name (e.g. Benchpress)"
+    )
+    parser.add_argument(
+        "-p", "--person",
+        type=int,
+        required=True,
+        help="Person number (e.g. 1)"
+    )
+    parser.add_argument(
+        "-s", "--set",
+        dest="set_id",
+        type=int,
+        required=True,
+        help="Set number (e.g. 1)"
+    )
+    parser.add_argument(
+        "-d", "--dataset_root",
+        type=str,
+        default=r"C:\Users\skogl\Downloads\eirikgsk\Master_git\dataset",
+        help="Dataset root directory"
+    )
+    return parser.parse_args()
+
+
+
+args = parse_args()
+
+DATASET_ROOT = args.dataset_root
+EXERCISE_NAME = args.exercise
+PERSON_ID = args.person
+SET_ID = args.set_id
+
+
+
+def extract_number(name):
+    match = re.search(r"\d+", name)
+    return int(match.group()) if match else None
+
+
+def find_matching_folder(parent, target_number):
+    for folder in os.listdir(parent):
+        folder_path = os.path.join(parent, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        number = extract_number(folder.lower())
+        if number == target_number:
+            return folder_path
+
+    return None
+
+
+# --------------------------------------------------
+# Resolve paths
+# --------------------------------------------------
+exercise_path = os.path.join(DATASET_ROOT, EXERCISE_NAME)
+if not os.path.isdir(exercise_path):
+    raise RuntimeError(f"Exercise not found: {exercise_path}")
+
+person_path = find_matching_folder(exercise_path, PERSON_ID)
+if not person_path:
+    raise RuntimeError(f"Person {PERSON_ID} not found in {exercise_path}")
+
+set_path = find_matching_folder(person_path, SET_ID)
+if not set_path:
+    raise RuntimeError(f"Set {SET_ID} not found in {person_path}")
+
+# --------------------------------------------------
+# Find files
+# --------------------------------------------------
 video_path = None
-for f in os.listdir(recording_folder):
-    if f.endswith(".mkv"):
-        video_path = os.path.join(recording_folder, f)
+for f in os.listdir(set_path):
+    if f.lower().endswith(".mkv"):
+        video_path = os.path.join(set_path, f)
         break
 
-json_path = os.path.join(recording_folder, "joint_data.json")
+json_path = os.path.join(set_path, "joint_data.json")
 
-if not video_path or not os.path.isfile(video_path):
-    raise FileNotFoundError(f"No .mkv video found in {recording_folder}")
+if not video_path:
+    raise FileNotFoundError(f"No .mkv video found in {set_path}")
 if not os.path.isfile(json_path):
-    raise FileNotFoundError(f"joint_data.json not found in {recording_folder}")
+    raise FileNotFoundError(f"joint_data.json not found in {set_path}")
 
 print(f"Video: {video_path}")
 print(f"JSON:  {json_path}")
+
 
 # --- Load JSON ---
 with open(json_path) as f:
@@ -64,7 +136,7 @@ print(f"Video: {w}x{h}, {fps} fps")
 print("=" * 60)
 
 # --- Adjustable parameters with persistence ---
-settings_file = os.path.join(recording_folder, "skeleton_settings.json")
+settings_file = os.path.join(set_path, "skeleton_settings.json")
 
 if os.path.exists(settings_file):
     with open(settings_file, 'r') as f:
@@ -256,7 +328,8 @@ while cap.isOpened() and frame_idx < len(frames):
             cv2.putText(frame, "PAUSED", (10, info_y + 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        cv2.imshow(f"{EXERCISE_NAME} / {PERSON_NAME} / recording_{RECORDING_ID}", frame)
+        cv2.imshow(f"{EXERCISE_NAME} / Person{PERSON_ID} / Set{SET_ID}", frame)
+
         needs_redraw = False
 
         if not paused:

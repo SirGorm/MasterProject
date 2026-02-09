@@ -1,7 +1,13 @@
 import os
 import subprocess
 import time
+"""
+Batch process .mkv files in dataset to generate joint_data.json files
+    - Run script, it will walk through dataset folders
+    - For each .mkv file found, it will check if joint_data.json exists
+    - If not, it will call offline_processor.exe to process the .mkv file
 
+"""
 # Path to offline_processor.exe
 exe_path = r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\Offline_processor\build\bin\Debug\offline_processor.exe"
 

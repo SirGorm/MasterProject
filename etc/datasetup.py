@@ -2,7 +2,14 @@ from pathlib import Path
 import logging
 import sys
 import argparse
+"""
+Create directory structure for dataset
+Structure: dataset / exercise / person_id / recording_NNN /
+- Exercises: Squat, Benchpress, Pullup, Deadlift
 
+usage example:  
+python datasetup.py -p (num of people) -s (num of sets) -d (dataset root / optional)
+"""
 def parse_args():
     parser = argparse.ArgumentParser(description="Create dataset directory structure")  
     parser.add_argument("--num_people", "-p", type=int, default=10, help="Number of participants")

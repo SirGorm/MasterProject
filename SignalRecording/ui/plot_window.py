@@ -16,6 +16,7 @@ import sifi_bridge_py as sbp
 import pyqtgraph as pg
 import time
 import json
+import subprocess
 
 
 class PlotWindow(QtWidgets.QMainWindow):
@@ -673,11 +674,56 @@ class PlotWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "No Data", "No data has been recorded yet.")
             return
 
-        # User selects base directory
-        base_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select Base Directory for Recordings"
+        # Stop acquisition temporarily to prevent Rust library stdio conflicts
+        was_running = self.acquisition_running
+        was_recording = self.is_recording
+        if was_running:
+            self.stop_acquisition()
+            time.sleep(0.3)  # Give worker more time to stop
+
+        logging.info("About to open file dialog...")
+
+        # Disconnect from sifi bridge temporarily to prevent Rust panics
+        was_connected = self.is_connected
+        if was_connected:
+            logging.info("Disconnecting SifiBridge before dialog...")
+            QtCore.QMetaObject.invokeMethod(self.worker, "disconnect_bridge", QtCore.Qt.DirectConnection)
+            time.sleep(0.5)  # Wait for disconnect
+
+        # Kill the sifibridge process to prevent Rust panic
+        try:
+            subprocess.run(['taskkill', '/F', '/IM', 'sifibridge.exe'],
+                          capture_output=True, timeout=5)
+            logging.info("Killed sifibridge.exe process")
+            time.sleep(0.5)
+        except Exception as e:
+            logging.warning(f"Could not kill sifibridge: {e}")
+
+        logging.info("Opening file dialog now...")
+
+        # Use a simple text input instead of file dialog to avoid Rust panic
+        default_path = str(Path.home() / "BioPointRecordings")
+        base_dir, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Save Location",
+            "Enter folder path for recordings:",
+            QtWidgets.QLineEdit.Normal,
+            default_path
         )
+
+        if not ok:
+            base_dir = ""
+
+        logging.info(f"Input dialog closed, selected: {base_dir}")
         if not base_dir:
+            # User cancelled - but sifibridge was killed, so restart is required
+            if was_connected:
+                logging.info("Cancelled but sifibridge was killed. Restart required.")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Restart Required",
+                    "Save cancelled.\n\nPlease restart the application to continue recording."
+                )
             return
 
         # Create new folder: recording_001, recording_002, ...
@@ -760,6 +806,16 @@ class PlotWindow(QtWidgets.QMainWindow):
         except Exception as e:
             logging.error(f"Error saving data: {e}", exc_info=True)
             QtWidgets.QMessageBox.critical(self, "Error", f"Error saving data: {e}")
+        finally:
+            # Note: After killing sifibridge.exe, we cannot reconnect with the same object
+            # User needs to restart the application to record again
+            if was_connected:
+                logging.info("Save complete. Please restart the application to record again.")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Restart Required",
+                    "Data saved successfully.\n\nPlease restart the application to record again."
+                )
 
     def handle_worker_finished(self):
         """Handles the 'finished' signal from the worker."""

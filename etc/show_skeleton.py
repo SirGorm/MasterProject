@@ -1,85 +1,101 @@
+"""
+Playback joint data from dataset using Open3D.
+Usage example:
+python show_skeleton.py -ex (Exercise) -p (person id) -s (set id) -d (dataset root / optional)
+"""
 import os
 import json
+import argparse
 import open3d as o3d
 import numpy as np
 import time
+import re
 
-def recording_folder_name(rec_id):
-    return f"recording_{int(rec_id):03d}"
+# ----------------------------------------------------
+# Argument parsing
+# ----------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="Playback joint data")
+    parser.add_argument("-ex", "--exercise", type=str, required=True, help="Exercise name (e.g. Squat)")
+    parser.add_argument("-p", "--person", type=int, required=True, help="Person number (e.g. 1)")
+    parser.add_argument("-s", "--set", dest="set_id", type=int, required=True, help="Set number (e.g. 1)")
+    parser.add_argument("-d", "--dataset_root", type=str, default=None, help="Dataset root path")
+    return parser.parse_args()
 
-# --- Playback settings ---
-USE_TIMESTAMP = True
-PAUSE_TIME = 0.05
+# ----------------------------------------------------
+# Helpers
+# ----------------------------------------------------
+def extract_number(name):
+    """Extract first number found in a string"""
+    match = re.search(r"\d+", name)
+    return int(match.group()) if match else None
 
-# --- Dataset selection ---
-# Structure: data / exercise / person / recording_NNN /
-DATASET_ROOT = r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data"
-EXERCISE_NAME = "Warmup"      # None = all exercises
-PERSON_NAME = "person1"       # None = all persons
-RECORDING_ID = "001"
-RECORDING_NAME = recording_folder_name(RECORDING_ID)  # None = all recordings
+def find_matching_folder(parent, target_number):
+    """
+    Find folder in parent whose name contains target_number
+    (case-insensitive, flexible naming)
+    """
+    for folder in os.listdir(parent):
+        folder_path = os.path.join(parent, folder)
+        if not os.path.isdir(folder_path):
+            continue
 
+        number = extract_number(folder)
+        if number == target_number:
+            return folder_path
 
-# Find chosen joint data
-json_files = []
+    return None
 
-for exercise in os.listdir(DATASET_ROOT):
-    if EXERCISE_NAME and exercise != EXERCISE_NAME:
-        continue
+# ----------------------------------------------------
+# Main
+# ----------------------------------------------------
+def main():
+    args = parse_args()
 
-    exercise_path = os.path.join(DATASET_ROOT, exercise)
+    DATASET_ROOT = args.dataset_root or r"C:\Users\skogl\Downloads\eirikgsk\MasterProject\data"
+
+    exercise_path = os.path.join(DATASET_ROOT, args.exercise)
     if not os.path.isdir(exercise_path):
-        continue
+        raise RuntimeError(f"Exercise not found: {exercise_path}")
 
-    for person in os.listdir(exercise_path):
-        if PERSON_NAME and person != PERSON_NAME:
-            continue
+    person_path = find_matching_folder(exercise_path, args.person)
+    if not person_path:
+        raise RuntimeError(f"Person {args.person} not found under {exercise_path}")
 
-        person_path = os.path.join(exercise_path, person)
-        if not os.path.isdir(person_path):
-            continue
+    set_path = find_matching_folder(person_path, args.set_id)
+    if not set_path:
+        raise RuntimeError(f"Set {args.set_id} not found under {person_path}")
 
-        for recording in os.listdir(person_path):
-            if RECORDING_NAME and recording != RECORDING_NAME:
-                continue
+    json_path = os.path.join(set_path, "joint_data.json")
+    if not os.path.isfile(json_path):
+        raise RuntimeError(f"joint_data.json not found in {set_path}")
 
-            recording_path = os.path.join(person_path, recording)
-            json_path = os.path.join(recording_path, "joint_data.json")
+    print(f"Playing back: {json_path}")
 
-            if os.path.isfile(json_path):
-                json_files.append(json_path)
+    # ----------------------------------------------------
+    # Open3D playback
+    # ----------------------------------------------------
+    USE_TIMESTAMP = True
+    PAUSE_TIME = 0.05
 
-if not json_files:
-    raise RuntimeError("No joint_data.json found for chosen exercise/person/recording")
-
-print(f"Found {len(json_files)} files")
-
-# --- Open3D visualizer ---
-vis = o3d.visualization.Visualizer()
-vis.create_window()
-
-points = o3d.geometry.PointCloud()
-lines = o3d.geometry.LineSet()
-
-prev_timestamp = None
-geometry_added = False
-
-# --- Play back all found files ---
-for file_path in json_files:
-
-    print(f"\nPlayback of file: {file_path}")
-
-    with open(file_path) as f:
+    with open(json_path) as f:
         data = json.load(f)
 
     joint_names = data["joint_names"]
     bone_list = data["bone_list"]
     frames = data["frames"]
 
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+
+    points = o3d.geometry.PointCloud()
+    lines = o3d.geometry.LineSet()
+
+    geometry_added = False
     prev_timestamp = None
 
     for frame in frames:
-        bodies = frame["bodies"]
+        bodies = frame.get("bodies", [])
         if not bodies:
             continue
 
@@ -106,7 +122,6 @@ for file_path in json_files:
         vis.poll_events()
         vis.update_renderer()
 
-        # --- Playback timing ---
         if USE_TIMESTAMP:
             timestamp = frame["timestamp_usec"] / 1_000_000
             if prev_timestamp is not None:
@@ -117,4 +132,7 @@ for file_path in json_files:
         else:
             time.sleep(PAUSE_TIME)
 
-vis.destroy_window()
+    vis.destroy_window()
+
+if __name__ == "__main__":
+    main()

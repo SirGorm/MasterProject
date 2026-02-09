@@ -13,6 +13,10 @@ http://127.0.0.1:8050/
 
 Browse through all exercise folders and recordings in the dataset.
 Structure: dataset / exercise / person_id / recording_NNN /
+    -Each recording folder should contain CSV files with signal data.
+    -You can select one or more CSV files to plot their signals.
+    -You can navigate through the signal using the slider, and toggle options
+    -Edit markers, which are vertical lines in the plot with labels and colors.
 '''
 
 # --- Konfigurasjon ---
@@ -258,8 +262,14 @@ def update_slider_range(selected_files, exercise, person, recording):
         return 10
     folder = get_folder(exercise, person, recording)
     try:
-        df = pd.read_csv(os.path.join(folder, selected_files[0]))
-        return max(1, len(df) // 10000)
+        # Find max time duration across all selected files
+        max_duration = 0
+        for file in selected_files:
+            df = pd.read_csv(os.path.join(folder, file))
+            ts = df.iloc[:, 0]
+            max_duration = max(max_duration, ts.max() - ts.min())
+        window_sec = 30  # 30 second windows
+        return max(1, int(max_duration // window_sec))
     except Exception:
         return 10
 
@@ -389,12 +399,14 @@ def update_plot(selected_files, window_index, options, exercise, person, recordi
         return go.Figure(), "Ingen data valgt", ""
 
     folder = get_folder(exercise, person, recording)
-    window_size = 10000
+    window_sec = 30  # seconds per window
     show_full = "full" in options
     show_markers = "markers" in options
     fig = go.Figure()
     stats_text = []
-    slider_info = "Viser hele signalet" if show_full else f"Vindu {window_index}"
+    t_start = window_index * window_sec
+    t_end = t_start + window_sec
+    slider_info = "Viser hele signalet" if show_full else f"Vindu {window_index} ({t_start:.0f}s - {t_end:.0f}s)"
 
     for file in selected_files:
         path = os.path.join(folder, file)
@@ -402,12 +414,20 @@ def update_plot(selected_files, window_index, options, exercise, person, recordi
             continue
         df = pd.read_csv(path)
         cols = df.columns.tolist()
-        signal_cols = [cols[0]] if len(cols) < 2 else cols[1:]
+        time_col = cols[0]
+        # Filter out columns that are entirely NaN (metadata columns like "Sampling Rate: X Hz")
+        signal_cols = [c for c in cols[1:] if not df[c].isna().all()]
+        if not signal_cols:
+            signal_cols = [time_col]
 
-        df_window = df if show_full else df.iloc[window_index * window_size:(window_index + 1) * window_size]
+        if show_full:
+            df_window = df
+        else:
+            # Time-based windowing: filter by timestamp range
+            df_window = df[(df[time_col] >= t_start) & (df[time_col] < t_end)]
 
         for col in signal_cols:
-            fig.add_trace(go.Scatter(x=df_window[cols[0]], y=df_window[col],
+            fig.add_trace(go.Scatter(x=df_window[time_col], y=df_window[col],
                                      mode='lines', name=f"{file} - {col}"))
         for col in signal_cols:
             stats_text.append(html.P(
