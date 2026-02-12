@@ -32,10 +32,8 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="neurokit2")
 
 import neurokit2 as nk
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config import CONFIG, SIGNALS
+from data.validate_data import DataValidator
 
 
 @dataclass
@@ -1400,31 +1398,6 @@ def preprocess_dataset(
     return all_windows
 
 
-def _find_session_dirs(exercise_path: Path) -> List[Tuple[str, Path]]:
-    """Find session directories, supporting nested PersonXX/SetYY layout.
-
-    Returns list of (session_id, path) tuples.
-    """
-    sessions = []
-
-    for child in sorted(exercise_path.iterdir()):
-        if not child.is_dir():
-            continue
-
-        # Check if this directory directly contains data files
-        has_data = (child / 'markers.json').exists()
-        if has_data:
-            sessions.append((child.name, child))
-        else:
-            # Nested layout: Exercise/PersonXX/SetYY/
-            for sub in sorted(child.iterdir()):
-                if sub.is_dir() and (sub / 'markers.json').exists():
-                    session_id = f"{child.name}/{sub.name}"
-                    sessions.append((session_id, sub))
-
-    return sessions
-
-
 def preprocess_dataset_legacy(
     dataset_path: Path = None,
     config=None
@@ -1448,7 +1421,7 @@ def preprocess_dataset_legacy(
         if not exercise_path.exists():
             continue
 
-        session_dirs = _find_session_dirs(exercise_path)
+        session_dirs = DataValidator._find_session_dirs(exercise_path)
 
         for session_id, session_dir in session_dirs:
             print(f"Processing {exercise}/{session_id}...")

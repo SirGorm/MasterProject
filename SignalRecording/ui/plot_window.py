@@ -72,6 +72,11 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.kinect_connected = False
         self.kinect_recording = False
 
+        # Set tracking for decoupled recording
+        self.kinect_sets = []          # List of dicts with set_number, start_time, end_time, duration
+        self.current_set_number = 0    # Counter for the current set
+        self.current_set_start = None  # Start time of current Kinect set (relative to data_start_time)
+
         self.init_ui()
         self.init_plots()
         self.connect_signals()
@@ -173,7 +178,8 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.kinect_status_label = QtWidgets.QLabel("Kinect: Disconnected")
         self.kinect_recording_label = QtWidgets.QLabel("Kinect Recording: OFF")
         self.marker_label = QtWidgets.QLabel("Markers: 0")
-        
+        self.set_counter_label = QtWidgets.QLabel("Sets: 0")
+
         status_layout = QtWidgets.QHBoxLayout()
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.recording_label)
@@ -181,6 +187,7 @@ class PlotWindow(QtWidgets.QMainWindow):
         status_layout.addWidget(self.kinect_status_label)
         status_layout.addWidget(self.kinect_recording_label)
         status_layout.addWidget(QtWidgets.QLabel("|"))
+        status_layout.addWidget(self.set_counter_label)
         status_layout.addWidget(self.marker_label)
         status_layout.addStretch()
         
@@ -324,6 +331,13 @@ class PlotWindow(QtWidgets.QMainWindow):
 
     def toggle_kinect_recording(self):
         """Toggle Kinect recording on/off."""
+        # Require BioPoint recording to be active before starting Kinect
+        if not self.is_recording and not self.kinect_recording:
+            QtWidgets.QMessageBox.warning(self, "Cannot Record Kinect",
+                                          "BioPoint recording must be active before starting Kinect recording.\n"
+                                          "Start BioPoint recording first.")
+            return
+
         if not self.kinect_connected:
             # Auto-connect if needed
             self.connect_to_kinect()
@@ -341,24 +355,69 @@ class PlotWindow(QtWidgets.QMainWindow):
                                         "Failed to connect to Kinect.")
     
     def _do_toggle_kinect(self):
-        """Actually toggle Kinect recording."""
+        """Actually toggle Kinect recording with automatic set markers."""
         if self.kinect_recording:
+            # STOPPING Kinect recording for current set
             logging.info("Stopping Kinect recording...")
-            QtCore.QMetaObject.invokeMethod(self.kinect_worker, "stop_kinect_recording", 
-                                          QtCore.Qt.QueuedConnection)
-        else:
-            logging.info("Starting Kinect recording...")
-            QtCore.QMetaObject.invokeMethod(self.kinect_worker, "start_kinect_recording", 
+            QtCore.QMetaObject.invokeMethod(self.kinect_worker, "stop_kinect_recording",
                                           QtCore.Qt.QueuedConnection)
 
+            # Record set end time and add automatic marker
+            if self.data_start_time is not None and self.current_set_start is not None:
+                end_time_rel = time.time() - self.data_start_time
+                label = f"Set_{self.current_set_number}_End"
+                color = 'r'
+
+                self.markers.append((end_time_rel, label, color))
+                self.next_marker_number += 1
+                self.add_marker_to_plots(end_time_rel, label, color)
+                self.marker_label.setText(f"Markers: {len(self.markers)}")
+                logging.info(f"Auto-marker added: {label} at {end_time_rel:.2f}s")
+
+                # Save completed set info
+                self.kinect_sets.append({
+                    "set_number": self.current_set_number,
+                    "start_time": self.current_set_start,
+                    "end_time": end_time_rel,
+                    "duration": end_time_rel - self.current_set_start,
+                })
+                self.current_set_start = None
+        else:
+            # STARTING Kinect recording for a new set
+            logging.info("Starting Kinect recording...")
+            QtCore.QMetaObject.invokeMethod(self.kinect_worker, "start_kinect_recording",
+                                          QtCore.Qt.QueuedConnection)
+
+            # Record set start time and add automatic marker
+            self.current_set_number += 1
+            if self.data_start_time is not None:
+                start_time_rel = time.time() - self.data_start_time
+                self.current_set_start = start_time_rel
+                label = f"Set_{self.current_set_number}_Start"
+                color = 'g'
+
+                self.markers.append((start_time_rel, label, color))
+                self.next_marker_number += 1
+                self.add_marker_to_plots(start_time_rel, label, color)
+                self.marker_label.setText(f"Markers: {len(self.markers)}")
+                logging.info(f"Auto-marker added: {label} at {start_time_rel:.2f}s")
+
     def start_recording_all(self):
-        """Toggle recording on both BioPoint and Kinect."""
+        """Start/Stop all recording. Starts BioPoint continuous + first Kinect set."""
         if not self.acquisition_running:
-            QtWidgets.QMessageBox.warning(self, "Cannot Record", 
-                                        "BioPoint acquisition must be running to record.")
+            QtWidgets.QMessageBox.warning(self, "Cannot Record",
+                                          "BioPoint acquisition must be running to record.")
             return
-        self.toggle_recording()     
-        self.toggle_kinect_recording()
+
+        if not self.is_recording:
+            # Starting: begin BioPoint recording, then start first Kinect set
+            self.toggle_recording()        # Start BioPoint continuous recording
+            self.toggle_kinect_recording() # Start Kinect Set 1
+        else:
+            # Stopping: stop Kinect set if active, then stop BioPoint recording
+            if self.kinect_recording:
+                self.toggle_kinect_recording()  # Stop current Kinect set
+            self.toggle_recording()             # Stop BioPoint continuous recording
 
     def on_kinect_connected_changed(self, connected):
         """Handle Kinect connection status change."""
@@ -388,12 +447,16 @@ class PlotWindow(QtWidgets.QMainWindow):
             self.kinect_recording_label.setStyleSheet("color: red; font-weight: bold;")
             self.kinect_record_button.setText("Stop Kinect Recording")
             self.record_all_button.setText("Stop All Recording")
+            self.set_counter_label.setText(f"Set {self.current_set_number} (recording...)")
+            self.set_counter_label.setStyleSheet("color: red; font-weight: bold;")
         else:
             self.kinect_recording_label.setText("Kinect Recording: OFF")
             self.kinect_recording_label.setStyleSheet("")
             self.kinect_record_button.setText("Start Kinect Recording")
             if not self.is_recording:
                 self.record_all_button.setText("Start All Recording")
+            self.set_counter_label.setText(f"Sets: {len(self.kinect_sets)}")
+            self.set_counter_label.setStyleSheet("")
 
     def disconnect_all(self):
         """Disconnect from all devices."""
@@ -502,6 +565,11 @@ class PlotWindow(QtWidgets.QMainWindow):
             return
         
         if self.is_recording:
+            # Auto-stop Kinect if still recording
+            if self.kinect_recording:
+                logging.warning("BioPoint recording stopped while Kinect set is active. Stopping Kinect.")
+                self._do_toggle_kinect()
+
             duration = time.time() - self.recording_start_time if hasattr(self, 'recording_start_time') else 0
             self.is_recording = False
             self.record_button.setText("Start BioPoint Recording")
@@ -509,16 +577,23 @@ class PlotWindow(QtWidgets.QMainWindow):
                 self.record_all_button.setText("Start All Recording")
             self.recording_label.setText("BioPoint Recording: OFF")
             self.recording_label.setStyleSheet("")
-            logging.info(f"BioPoint recording stopped. Duration: {duration:.1f} seconds")
+            logging.info(f"BioPoint recording stopped. Duration: {duration:.1f} seconds, Sets: {len(self.kinect_sets)}")
         else:
             for key in self.recorded_data:
                 self.recorded_data[key].clear()
-            
+
             self.recording_start_time = time.time()
             self.recording_start_offset = time.time() - self.data_start_time
             self.recording_start_sample = self.sample_counts["ecg"]
             self.is_recording = True
-            
+
+            # Reset set tracking for new recording session
+            self.kinect_sets = []
+            self.current_set_number = 0
+            self.current_set_start = None
+            self.set_counter_label.setText("Sets: 0")
+            self.set_counter_label.setStyleSheet("")
+
             self.record_button.setText("Stop BioPoint Recording")
             self.record_all_button.setText("Stop All Recording")
             self.recording_label.setText("BioPoint Recording: ON")
@@ -762,6 +837,16 @@ class PlotWindow(QtWidgets.QMainWindow):
 
             # Save metadata
             metadata_file = recording_dir / "metadata.json"
+
+            # Adjust kinect_sets times relative to recording start
+            adjusted_sets = []
+            for s in self.kinect_sets:
+                adjusted = s.copy()
+                if hasattr(self, 'recording_start_offset'):
+                    adjusted["start_time"] = s["start_time"] - self.recording_start_offset
+                    adjusted["end_time"] = s["end_time"] - self.recording_start_offset
+                adjusted_sets.append(adjusted)
+
             metadata = {
                 "timestamp": timestamp_str,
                 "recording_start": datetime.fromtimestamp(
@@ -772,7 +857,10 @@ class PlotWindow(QtWidgets.QMainWindow):
                 "duration_seconds": {
                     k: len(v) / self.FS.get(k.split('_')[0], 1)
                     for k, v in self.recorded_data.items() if v
-                }
+                },
+                "kinect_sets": adjusted_sets,
+                "total_kinect_sets": len(adjusted_sets),
+                "recording_mode": "continuous_biosignal_with_kinect_sets"
             }
 
             with open(metadata_file, 'w') as f:
@@ -824,6 +912,10 @@ class PlotWindow(QtWidgets.QMainWindow):
     def on_worker_stopped(self):
         """Handles the 'stopped' signal from the worker."""
         logging.info("Acquisition stopped.")
+        # Auto-stop Kinect if still recording
+        if self.kinect_recording:
+            logging.warning("Acquisition stopped while Kinect recording. Stopping Kinect.")
+            self._do_toggle_kinect()
         self.acquisition_running = False
         self.is_recording = False
         self.record_button.setText("Start BioPoint Recording")
@@ -942,9 +1034,10 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.add_marker_button.setEnabled(self.acquisition_running)
         self.power_off_button.setEnabled(self.is_connected)
 
-        # Kinect buttons - always enabled for auto-connect feature
+        # Kinect buttons
         self.view_camera_button.setEnabled(True)
-        self.kinect_record_button.setEnabled(True)
+        # Kinect record: enabled when BioPoint is recording, or when Kinect is already recording (to allow stopping)
+        self.kinect_record_button.setEnabled(self.is_recording or self.kinect_recording)
         self.record_all_button.setEnabled(self.is_connected and self.acquisition_running)
 
 

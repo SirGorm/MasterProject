@@ -15,9 +15,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import pickle
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config import CONFIG, SIGNALS, TASK_SIGNALS
 from data.preprocessing import DataPreprocessor, preprocess_dataset
 from utils import get_logger
@@ -113,7 +110,10 @@ class StrengthTrainingDataset(Dataset):
                 )
                 signals_dict[signal_name] = torch.zeros(1, expected_samples)
 
-        exercise_label = self.exercise_to_idx.get(window.get('exercise', 'Squat'), 0)
+        exercise_name = window.get('exercise', 'unknown')
+        if exercise_name not in self.exercise_to_idx:
+            logger.warning(f"Unknown exercise '{exercise_name}' in window {idx}, defaulting to index 0")
+        exercise_label = self.exercise_to_idx.get(exercise_name, 0)
         phase_str = window.get('phase', None)
         phase_label = self.phase_to_idx.get(phase_str, 0)
         rep_count = window.get('rep_count', 0)
@@ -152,7 +152,7 @@ class StrengthTrainingDataset(Dataset):
 
     def get_class_distribution(self) -> Dict[str, Dict]:
         from collections import Counter
-        exercise_labels = [self.exercise_to_idx.get(w.get('exercise', 'Squat'), 0) for w in self.windows]
+        exercise_labels = [self.exercise_to_idx.get(w.get('exercise', 'unknown'), 0) for w in self.windows]
         phase_labels = [self.phase_to_idx.get(w.get('phase', 'unknown'), 0) for w in self.windows]
         return {
             'exercise': {self.idx_to_exercise[k]: v for k, v in Counter(exercise_labels).items()},

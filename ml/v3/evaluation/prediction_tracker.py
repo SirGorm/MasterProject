@@ -123,7 +123,7 @@ class PredictionTracker:
             self.idx_to_exercise = {i: ex for i, ex in enumerate(active)}
         else:
             self.idx_to_exercise = {0: 'Squat', 1: 'Benchpress', 2: 'Pullup', 3: 'Deadlift'}
-        self.idx_to_phase = {0: 'eccentric', 1: 'concentric'}
+        self.idx_to_phase = {0: 'rest', 1: 'eccentric', 2: 'concentric'}
 
         # Statistics
         self.stats = {
@@ -166,8 +166,8 @@ class PredictionTracker:
 
         exercise_preds = torch.argmax(exercise_logits, dim=1).detach().cpu().numpy()
         phase_preds = torch.argmax(phase_logits, dim=1).detach().cpu().numpy()
-        rep_preds = rep_pred.squeeze().detach().cpu().numpy()
-        fatigue_preds = fatigue_pred.squeeze().detach().cpu().numpy()
+        rep_preds = rep_pred.squeeze(-1).detach().cpu().numpy()
+        fatigue_preds = fatigue_pred.squeeze(-1).detach().cpu().numpy()
 
         # Handle scalar tensors
         if rep_preds.ndim == 0:
@@ -423,8 +423,18 @@ class PredictionTracker:
 
     def load(self, filepath: str):
         """Load tracked data from disk."""
+        import io
+
+        class _ModuleRemapper(pickle.Unpickler):
+            """Handle pickle files saved with relative module paths."""
+            def find_class(self, module: str, name: str):
+                # Remap bare 'evaluation.*' to 'ml.v3.evaluation.*'
+                if module.startswith('evaluation.'):
+                    module = f'ml.v3.{module}'
+                return super().find_class(module, name)
+
         with open(filepath, 'rb') as f:
-            self.records = pickle.load(f)
+            self.records = _ModuleRemapper(f).load()
         self.record_counter = max(r.record_id for r in self.records) + 1 if self.records else 0
         print(f"Loaded {len(self.records)} records from {filepath}")
 

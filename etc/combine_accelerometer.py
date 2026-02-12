@@ -19,7 +19,10 @@ SAMPLING_RATE = 50  # Hz
 OUTPUT_FILENAME = "biopoint_a_combined.csv"
 AXIS_FILES = ["biopoint_ax.csv", "biopoint_ay.csv", "biopoint_az.csv"]
 
-DEFAULT_DATASET_ROOT = r"c:\Users\skogl\Downloads\eirikgsk\Master_git\dataset"
+DEFAULT_DATASET_ROOT = os.environ.get(
+    "STRENGTH_DATASET_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "dataset")
+)
 
 
 def parse_args():

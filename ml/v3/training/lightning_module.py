@@ -92,8 +92,8 @@ class StrengthTrainingLitModule(pl.LightningModule):
         metrics_dict['loss'] += loss.item() * batch_size
         metrics_dict['correct_ex'] += pred_ex.eq(exercise_labels).sum().item()
         metrics_dict['correct_ph'] += pred_ph.eq(phase_labels).sum().item()
-        metrics_dict['rep_mae'] += torch.abs(rep_pred.squeeze() - rep_labels.float()).sum().item()
-        metrics_dict['fat_mae'] += torch.abs(fatigue_pred.squeeze() - fatigue_labels.float()).sum().item()
+        metrics_dict['rep_mae'] += torch.abs(rep_pred.squeeze(-1) - rep_labels.float()).sum().item()
+        metrics_dict['fat_mae'] += torch.abs(fatigue_pred.squeeze(-1) - fatigue_labels.float()).sum().item()
         metrics_dict['n'] += batch_size
 
         return loss, predictions, targets

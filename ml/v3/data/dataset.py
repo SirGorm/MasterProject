@@ -69,8 +69,8 @@ class StrengthTrainingDataset(Dataset):
         self.exercise_to_idx = {ex: i for i, ex in enumerate(active_exercises)}
         self.idx_to_exercise = {i: ex for ex, i in self.exercise_to_idx.items()}
 
-        self.phase_to_idx = {'eccentric': 0, 'concentric': 1}
-        self.idx_to_phase = {0: 'eccentric', 1: 'concentric'}
+        self.phase_to_idx = {'rest': 0, 'eccentric': 1, 'concentric': 2}
+        self.idx_to_phase = {0: 'rest', 1: 'eccentric', 2: 'concentric'}
 
         self.scalers = scalers or {}
         if fit_scalers and mode == 'train':
@@ -179,7 +179,7 @@ class StrengthTrainingDataset(Dataset):
     def get_num_classes(self) -> Dict[str, int]:
         return {
             'exercise': len(self.exercise_to_idx),
-            'phase': 2
+            'phase': len(self.phase_to_idx)
         }
 
     def get_signal_shapes(self) -> Dict[str, Tuple[int, ...]]:
@@ -313,7 +313,7 @@ class SlidingWindowInference:
 
         result = {
             'exercise': self.config.data.exercises[exercise_pred],
-            'phase': 'eccentric' if phase_pred == 0 else 'concentric',
+            'phase': {0: 'rest', 1: 'eccentric', 2: 'concentric'}.get(phase_pred, 'unknown'),
             'rep_count': int(round(self.current_rep_count)),
             'fatigue_level': min(1.0, max(0.0, self.cumulative_fatigue)),
             'raw_predictions': {

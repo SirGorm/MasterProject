@@ -8,15 +8,12 @@ Antall valleys ≈ antall reps.
 Kjør: python verify_ground_truth.py
 """
 
-import sys
 from pathlib import Path
 import json
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import uniform_filter1d
 from scipy import signal as scipy_signal
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from config import CONFIG
 from data.preprocessing import DataPreprocessor, JointProcessor
@@ -126,7 +123,7 @@ def verify_single_session(session_path: Path, exercise: str):
         # Vis kun noen eksempler
         if t <= start_time + 12:
             print(f"  t={t:.1f}-{t+window_sec:.1f}s: fase={phase:12s}, velocity={velocity:.4f} m/s")
-        t += window_sec * 0.0  #  overlap
+        t += window_sec
 
     print(f"\n  Fasefordeling i vinduer:")
     total_windows = sum(phases_detected.values())

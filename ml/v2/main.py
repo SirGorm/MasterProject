@@ -15,9 +15,9 @@ Usage:
 """
 
 import argparse
-import sys
 import pickle
 from pathlib import Path
+import sys
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import (
@@ -26,7 +26,6 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers import TensorBoardLogger
 
 PROJECT_ROOT = Path(__file__).parent.absolute()
-sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def main():

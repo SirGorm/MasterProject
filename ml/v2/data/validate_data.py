@@ -11,16 +11,12 @@ Sessions with errors are SKIPPED (not used for training).
 Training continues with valid sessions only.
 """
 
-import sys
 import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import CONFIG, SIGNALS
 

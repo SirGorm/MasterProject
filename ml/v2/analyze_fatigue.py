@@ -9,7 +9,6 @@ Analyzes fatigue patterns from biosignals and joint kinematics:
 Usage: python analyze_fatigue.py
 """
 
-import sys
 from pathlib import Path
 import json
 import numpy as np
@@ -17,8 +16,6 @@ import matplotlib.pyplot as plt
 from scipy import signal as scipy_signal
 from scipy.stats import pearsonr, spearmanr
 from collections import defaultdict
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from config import CONFIG
 from data.preprocessing import DataPreprocessor, SignalPreprocessor

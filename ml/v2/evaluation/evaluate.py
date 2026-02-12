@@ -21,9 +21,6 @@ from typing import Dict, List, Tuple, Any, Optional
 from torch.utils.data import DataLoader
 import json
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config import CONFIG
 from models import StrengthTrainingModel, create_model
 from utils import get_logger
@@ -329,7 +326,7 @@ def evaluate_model(
     config = config or CONFIG
     output_dir = output_dir or config.output.results_dir
 
-    checkpoint = torch.load(model_path, map_location='cpu')
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     model = create_model(config)
     model.load_state_dict(checkpoint['model_state_dict'])
 

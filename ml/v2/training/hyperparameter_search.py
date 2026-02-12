@@ -4,17 +4,16 @@ Hyperparameter Search for Strength Training ML v2.
 Uses Optuna + PyTorch Lightning.
 """
 
+import copy
+
 import optuna
 from optuna.trial import Trial
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
-import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
 import json
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import CONFIG
 from data.dataset import create_dataloaders
@@ -23,7 +22,7 @@ from training.lightning_module import StrengthTrainingLitModule
 
 def objective(trial: Trial, n_epochs: int = 10) -> float:
     """Objective function for Optuna optimization."""
-    config = CONFIG
+    config = copy.deepcopy(CONFIG)
 
     config.training.learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
     config.training.batch_size = trial.suggest_categorical('batch_size', [8, 16, 32, 64])
@@ -66,8 +65,6 @@ def objective(trial: Trial, n_epochs: int = 10) -> float:
     except Exception as e:
         print(f"Training failed: {e}")
         raise optuna.TrialPruned()
-    finally:
-        config.tracking.enabled = True
 
     trial.report(val_loss, n_epochs)
     if trial.should_prune():

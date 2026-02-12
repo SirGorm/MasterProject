@@ -20,8 +20,13 @@ Structure: dataset / exercise / person_id / recording_NNN /
 '''
 
 # --- Konfigurasjon ---
-DATASET_ROOT = r"C:\Users\skogl\Downloads\eirikgsk\Master_git\dataset"
-
+"""
+DATASET_ROOT = os.environ.get(
+    "STRENGTH_DATASET_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "dataset")
+)
+"""
+DATASET_ROOT = r"C:\MasterProject\Code_v1\dataset"  # For lokal testing
 COLORS = ["r", "g", "b", "y", "m", "c"]
 COLOR_MAP = {
     "r": "red", "g": "green", "b": "blue", "y": "yellow",

@@ -20,7 +20,10 @@ import numpy as np
 from scipy.signal import find_peaks, butter, filtfilt
 import matplotlib.pyplot as plt
 
-DEFAULT_DATASET_ROOT = r"C:\Users\skogl\Downloads\eirikgsk\Master_git\dataset"
+DEFAULT_DATASET_ROOT = os.environ.get(
+    "STRENGTH_DATASET_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "dataset")
+)
 COMBINED_FILENAME = "biopoint_a_combined.csv"
 MARKERS_FILENAME = "markers.json"
 

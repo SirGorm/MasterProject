@@ -19,9 +19,12 @@ import json
 # BASE PATHS 
 # =============================================================================
 
-PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 
-DATASET_PATH = Path(r"c:\Users\skogl\Downloads\eirikgsk\Master_git\dataset")
+DATASET_PATH = Path(os.environ.get(
+    "STRENGTH_DATASET_PATH",
+    str(PROJECT_ROOT.parent.parent / "dataset")
+))
 
 OUTPUT_DIR = PROJECT_ROOT / "output"
 LOGS_DIR = OUTPUT_DIR / "logs"
@@ -48,15 +51,15 @@ class SignalConfig:
 
 
 SIGNALS: Dict[str, SignalConfig] = {
-    'emg': SignalConfig(name='emg', sampling_rate=2000.0, channels=1, file_name='biopoint_emg.csv'),
-    'ecg': SignalConfig(name='ecg', sampling_rate=500.0, channels=1, file_name='biopoint_ecg.csv'),
-    'eda': SignalConfig(name='eda', sampling_rate=100.0, channels=1, file_name='biopoint_eda.csv'),
-    'acc': SignalConfig(name='acc', sampling_rate=50.0, channels=1, file_name='biopoint_a_combined.csv'),
-    'ppg_ir': SignalConfig(name='ppg_ir', sampling_rate=50.0, channels=1, file_name='biopoint_ppg_ir.csv'),
-    'ppg_red': SignalConfig(name='ppg_red', sampling_rate=50.0, channels=1, file_name='biopoint_ppg_red.csv'),
-    'ppg_green': SignalConfig(name='ppg_green', sampling_rate=50.0, channels=1, file_name='biopoint_ppg_green.csv'),
-    'ppg_blue': SignalConfig(name='ppg_blue', sampling_rate=50.0, channels=1, file_name='biopoint_ppg_blue.csv'),
-    'joints': SignalConfig(name='joints', sampling_rate=15.0, channels=96, file_name='joint_data.json', enabled=False),
+    'emg':       SignalConfig(name='emg',       sampling_rate=2000.0, channels=1, file_name='biopoint_emg.csv'),
+    'ecg':       SignalConfig(name='ecg',       sampling_rate=500.0,  channels=1, file_name='biopoint_ecg.csv'),
+    'eda':       SignalConfig(name='eda',       sampling_rate=100.0,  channels=1, file_name='biopoint_eda.csv'),
+    'acc':       SignalConfig(name='acc',       sampling_rate=50.0,   channels=1, file_name='biopoint_a_combined.csv'),
+    'ppg_ir':    SignalConfig(name='ppg_ir',    sampling_rate=50.0,   channels=1, file_name='biopoint_ppg_ir.csv'),
+    'ppg_red':   SignalConfig(name='ppg_red',   sampling_rate=50.0,   channels=1, file_name='biopoint_ppg_red.csv'),
+    'ppg_green': SignalConfig(name='ppg_green', sampling_rate=50.0,   channels=1, file_name='biopoint_ppg_green.csv'),
+    'ppg_blue':  SignalConfig(name='ppg_blue',  sampling_rate=50.0,   channels=1, file_name='biopoint_ppg_blue.csv'),
+    'joints':    SignalConfig(name='joints',    sampling_rate=15.0,   channels=96, file_name='joint_data.json', enabled=False),
 }
 
 
@@ -66,9 +69,9 @@ SIGNALS: Dict[str, SignalConfig] = {
 
 TASK_SIGNALS: Dict[str, List[str]] = {
     'exercise': ['emg', 'ecg', 'acc', 'ppg_ir'],
-    'reps': ['acc', 'emg'],
-    'phase': ['acc', 'emg'],
-    'fatigue': ['emg', 'ecg', 'ppg_ir', 'eda']
+    'reps':     ['acc', 'emg'],
+    'phase':    ['acc', 'emg'],
+    'fatigue':  ['emg', 'ecg', 'ppg_ir', 'eda']
 }
 
 
@@ -108,7 +111,7 @@ class ModelConfig:
     attention_heads: int = 4
     attention_dropout: float = 0.1
     dropout: float = 0.3
-    n_exercises: int = 4
+    n_exercises: int = 3
     n_phases: int = 2
 
 
@@ -271,6 +274,7 @@ class Config:
     task_signals: Dict[str, List[str]] = field(default_factory=lambda: TASK_SIGNALS.copy())
 
     def __post_init__(self):
+        self.model.n_exercises = len(self.get_active_exercises())
         self.output.ensure_directories()
 
     def get_device(self) -> str:
@@ -345,14 +349,24 @@ class Config:
         with open(filepath, 'r') as f:
             data = json.load(f)
         config = cls()
-        for key, value in data.get('data', {}).items():
-            if hasattr(config.data, key):
-                if key == 'dataset_path':
-                    value = Path(value)
-                setattr(config.data, key, value)
-        for key, value in data.get('training', {}).items():
-            if hasattr(config.training, key):
-                setattr(config.training, key, value)
+
+        # Map of section name -> (sub-config object, fields that are Paths)
+        path_fields = {
+            'data': ['dataset_path'],
+            'output': ['output_dir', 'logs_dir', 'results_dir', 'plots_dir', 'models_dir'],
+        }
+
+        for section in ['data', 'model', 'training', 'preprocessing',
+                        'evaluation', 'output', 'fatigue', 'tracking', 'phase_detection']:
+            sub_config = getattr(config, section, None)
+            if sub_config is None:
+                continue
+            for key, value in data.get(section, {}).items():
+                if hasattr(sub_config, key):
+                    if key in path_fields.get(section, []):
+                        value = Path(value)
+                    setattr(sub_config, key, value)
+
         return config
 
     def print_summary(self):

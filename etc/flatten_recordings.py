@@ -18,7 +18,10 @@ import os
 import shutil
 import argparse
 
-DEFAULT_DATASET_ROOT = r"C:\Users\skogl\Downloads\eirikgsk\Master_git\dataset"
+DEFAULT_DATASET_ROOT = os.environ.get(
+    "STRENGTH_DATASET_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "dataset")
+)
 
 
 def parse_args():

@@ -12,10 +12,6 @@ import pytorch_lightning as pl
 from typing import Dict, Tuple, Any, Optional
 import random
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config import CONFIG
 from models import StrengthTrainingModel, MultiTaskLoss
 from evaluation import PredictionTracker, visualize_prediction, visualize_prediction_with_skeleton

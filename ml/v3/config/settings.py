@@ -68,10 +68,10 @@ SIGNALS: Dict[str, SignalConfig] = {
 # =============================================================================
 
 TASK_SIGNALS: Dict[str, List[str]] = {
-    'exercise': ['emg', 'ecg', 'acc', 'ppg_ir'],
+    'exercise': ['emg', 'ecg', 'acc', 'ppg_ir','ppg_red', 'ppg_green', 'ppg_blue'],
     'reps':     ['acc', 'emg'],
-    'phase':    ['acc', 'emg', 'ecg', 'ppg_ir', 'eda'],
-    'fatigue':  ['acc', 'emg', 'ecg', 'ppg_ir', 'eda']
+    'phase':    ['acc', 'emg'],
+    'fatigue':  ['acc', 'emg', 'ecg', 'ppg_ir','ppg_red', 'ppg_green', 'ppg_blue', 'eda']
 }
 
 
@@ -112,7 +112,7 @@ class ModelConfig:
     attention_dropout: float = 0.1
     dropout: float = 0.3
     n_exercises: int = 3
-    n_phases: int = 2
+    n_phases: int = 3
 
 
 # =============================================================================
@@ -157,6 +157,14 @@ class PreprocessingConfig:
     extract_emg_frequency_features: bool = True
     use_raw_signals: bool = True
     use_extracted_features: bool = True
+
+#==============================================================================
+# JOINT PROCESSING CONFIGURATION
+#==============================================================================
+
+@dataclass
+class JointConfig:
+    delta_y_threshold: float = 0.012 # threshold for y-direction classification 
 
 
 # =============================================================================
@@ -287,6 +295,7 @@ class Config:
     fatigue: FatigueConfig = field(default_factory=FatigueConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     phase_detection: PhaseDetectionConfig = field(default_factory=PhaseDetectionConfig)
+    joint: JointConfig = field(default_factory=JointConfig)
     mlflow: MLflowConfig = field(default_factory=MLflowConfig)
     signals: Dict[str, SignalConfig] = field(default_factory=lambda: SIGNALS.copy())
     task_signals: Dict[str, List[str]] = field(default_factory=lambda: TASK_SIGNALS.copy())
@@ -349,7 +358,7 @@ class Config:
 
         result = {}
         for field_name in ['data', 'model', 'training', 'preprocessing',
-                          'evaluation', 'output', 'fatigue', 'tracking', 'phase_detection', 'mlflow']:
+                          'evaluation', 'output', 'fatigue', 'tracking', 'phase_detection', 'joint', 'mlflow']:
             field_value = getattr(self, field_name)
             result[field_name] = asdict(field_value)
             for key, value in result[field_name].items():
@@ -375,7 +384,7 @@ class Config:
         }
 
         for section in ['data', 'model', 'training', 'preprocessing',
-                        'evaluation', 'output', 'fatigue', 'tracking', 'phase_detection', 'mlflow']:
+                        'evaluation', 'output', 'fatigue', 'tracking', 'phase_detection', 'joint', 'mlflow']:
             sub_config = getattr(config, section, None)
             if sub_config is None:
                 continue

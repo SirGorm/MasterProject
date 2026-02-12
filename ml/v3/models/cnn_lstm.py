@@ -320,7 +320,7 @@ class StrengthTrainingModel(nn.Module):
         )
 
         self.phase_head = MultiTaskHead(
-            fusion_dim, 128, 2, dropout, is_regression=False  # Eccentric/Concentric
+            fusion_dim, 128, model_cfg.n_phases, dropout, is_regression=False  # rest/eccentric/concentric
         )
 
         self.reps_head = MultiTaskHead(
@@ -536,8 +536,8 @@ class MultiTaskLoss(nn.Module):
         loss_phase = self.phase_criterion(phase_logits, phase_labels)
         # Binary classification for reps: ensure labels are binary (0 or 1)
         rep_labels_binary = (rep_labels > 0).float()
-        loss_reps = self.rep_criterion(rep_pred.squeeze(), rep_labels_binary)
-        loss_fatigue = self.fatigue_criterion(fatigue_pred.squeeze(), fatigue_labels.float())
+        loss_reps = self.rep_criterion(rep_pred.squeeze(-1), rep_labels_binary)
+        loss_fatigue = self.fatigue_criterion(fatigue_pred.squeeze(-1), fatigue_labels.float())
 
         if self.use_uncertainty_weighting:
             # Uncertainty weighting

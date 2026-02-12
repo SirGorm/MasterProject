@@ -17,9 +17,6 @@ from scipy.signal import savgol_filter
 from scipy.ndimage import median_filter
 import pickle
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config import CONFIG
 
 

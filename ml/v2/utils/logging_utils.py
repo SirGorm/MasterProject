@@ -59,7 +59,12 @@ def get_logger(name: str = 'main'):
 
 
 class TrainingLogger:
-    """Logger for training metrics. Uses csv.DictWriter instead of manual f-strings."""
+    """Logger for training metrics. Uses csv.DictWriter instead of manual f-strings.
+
+    Deprecated: Not used by the Lightning module (StrengthTrainingLitModule),
+    which handles metric logging via Lightning's built-in self.log().
+    Kept for backwards compatibility with non-Lightning training scripts.
+    """
 
     FIELDS = [
         'Epoch', 'Train Loss', 'Val Loss',

@@ -47,7 +47,7 @@ def setup_logging(
         encoding='utf-8'
     )
 
-    return {'main': logger, 'train': logger, 'eval': logger, 'phase': logger,
+    return {'main': logger, 'train': logger, 'constants': logger, 'phase': logger,
             'data': logger, 'signals': logger, 'preprocessing': logger}
 
 

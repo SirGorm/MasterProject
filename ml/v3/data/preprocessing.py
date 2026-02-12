@@ -9,11 +9,10 @@ Handles:
 
 Data Sources:
 - Biosignals (EMG, ECG, EDA, PPG, IMU): Model input features
-- markers.json: Ground truth labels (start/end times, rep markers, phases)
-- joint_data.json: Auxiliary ground truth (skeleton for phase/rep derivation)
+- markers.json: Ground truth labels (start/end times, rep markers)
+- joint_data.json: Auxiliary ground truth (skeleton for phase/rep/fatigue)
 
 Note: joint_data is NOT used as model input (only for ground truth label extraction)
-Features can be combined with raw signals for model input.
 """
 
 import warnings
@@ -21,12 +20,12 @@ import numpy as np
 import pandas as pd
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from scipy import signal as scipy_signal
+from scipy.signal import welch
 from scipy.ndimage import uniform_filter1d
 
-# Suppress pandas ChainedAssignmentError warnings from neurokit2 internals (CoW compatibility issue)
 warnings.filterwarnings("ignore", message=".*ChainedAssignment.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="neurokit2")
 
@@ -36,225 +35,118 @@ from ml.v3.config.settings import CONFIG, SIGNALS
 from ml.v3.data.validate_data import DataValidator
 from ml.v3.utils.logging_utils import get_logger
 from ml.v3.utils.constants import (
-    JOINT_NAMES,
-    JOINT_TO_IDX,
-    EXERCISE_JOINT_IDX,
-    EXERCISE_PHASE_CONFIG,
     BONE_CONNECTIONS,
+    EXERCISE_CONFIG,
+    JOINT_NAMES,
     REST_VELOCITY_THRESHOLD,
-    get_exercise_joint_index,
-    get_exercise_phase_config,
+    get_exercise_all_joint_index,
 )
-from ml.v3.utils.signal_utils import compute_emg_frequency_features
 
 logger = get_logger('preprocessing')
 
+
 @dataclass
 class WindowedSignal:
-    """Container for a windowed signal segment."""
     data: np.ndarray
     start_time: float
     end_time: float
     rep_count: int
-    phase: str  # 'eccentric', 'concentric', or 'unknown'
+    phase: str
     fatigue_score: float
 
 
 @dataclass
 class ExtractedFeatures:
-    """Container for extracted features from a signal window."""
     raw_signal: np.ndarray
     features: Dict[str, float]
     feature_vector: np.ndarray
 
 
 class SignalPreprocessor:
-    """
-    Preprocessor for individual signal modalities using NeuroKit2.
-    """
+    """Preprocessor for individual biosignal modalities using NeuroKit2."""
 
     def __init__(self, config=None):
         self.config = config or CONFIG
 
-    def preprocess_emg(
-        self,
-        emg_signal: np.ndarray,
-        sampling_rate: float,
-        plot: bool = False
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        Preprocess EMG signal using NeuroKit2.
-
-        Args:
-            emg_signal: Raw EMG signal
-            sampling_rate: Sampling rate in Hz
-
-        Returns:
-            Tuple of (cleaned signal, extracted features)
-        """
-        
-        logger.debug("Preprocessing EMG signal with NeuroKit2")
-
-        # Porcess EMG (clean, extract amplitude envelope, etc.)
-        emg_signal, emg_info = nk.emg_process(emg_signal, sampling_rate=sampling_rate)
-        
-        # Optional plotting
+    def preprocess_emg(self, emg_signal: np.ndarray, sampling_rate: float, plot: bool = False) -> Tuple[np.ndarray, Dict[str, float]]:
+        logger.debug("Preprocessing EMG")
+        emg_processed, info = nk.emg_process(emg_signal, sampling_rate=sampling_rate)
         if plot:
-            nk.emg_plot(emg_signal, emg_info)
+            nk.emg_plot(emg_processed, info)
 
-        emg_cleaned   = emg_signal['EMG_Clean'].values
-        emg_amplitude = emg_signal['EMG_Amplitude'].values
-        
-        # Extract features
+        cleaned = emg_processed['EMG_Clean'].values
+        amplitude = emg_processed['EMG_Amplitude'].values
+
         features = {
-            'emg_rms': np.sqrt(np.mean(emg_cleaned ** 2)),
-            'emg_mean_amplitude': np.mean(emg_amplitude),
-            'emg_max_amplitude': np.max(emg_amplitude),
-            'emg_std': np.std(emg_cleaned),
+            'emg_rms': np.sqrt(np.mean(cleaned ** 2)),
+            'emg_mean_amplitude': np.mean(amplitude),
+            'emg_max_amplitude': np.max(amplitude),
+            'emg_std': np.std(cleaned),
         }
+        features.update(self._compute_emg_frequency_features(cleaned, sampling_rate))
+        return cleaned, features
 
-        # Frequency domain features for fatigue detection
-        freq_features = self._compute_emg_frequency_features(emg_cleaned, sampling_rate)
-        features.update(freq_features)
-        
-        return emg_cleaned, features
-
-    def preprocess_ecg(
-        self,
-        ecg_signal: np.ndarray,
-        sampling_rate: float,
-        plot: bool = False
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        Preprocess ECG signal and extract HRV features using NeuroKit2.
-
-        Args:
-            ecg_signal: Raw ECG signal
-            sampling_rate: Sampling rate in Hz
-
-        Returns:
-            Tuple of (cleaned signal, extracted features including HRV)
-        """
-        features = {}
-        logger.debug("Preprocessing ECG signal with NeuroKit2")
-        # Process ECG (clean, detect R-peaks, etc.)
-        ecg_signals, ecg_info = nk.ecg_process(ecg_signal, sampling_rate=sampling_rate)
-
-        ecg_cleaned = ecg_signals['ECG_Clean'].values
-    
-        # Optional plotting
+    def preprocess_ecg(self, ecg_signal: np.ndarray, sampling_rate: float, plot: bool = False) -> Tuple[np.ndarray, Dict[str, float]]:
+        logger.debug("Preprocessing ECG")
+        processed, info = nk.ecg_process(ecg_signal, sampling_rate=sampling_rate)
         if plot:
-            nk.ecg_plot(ecg_signals, ecg_info)
-            
+            nk.ecg_plot(processed, info)
 
-        # Extract R-peaks
-        r_peaks = ecg_info['ECG_R_Peaks']
+        cleaned = processed['ECG_Clean'].values
+        r_peaks = info['ECG_R_Peaks']
+        features = {}
 
         if len(r_peaks) >= 3:
-            # Compute HRV features
-            hrv_indices = nk.hrv_time(r_peaks, sampling_rate=sampling_rate)
-
-            features['hrv_rmssd'] = hrv_indices['HRV_RMSSD'].values[0] if 'HRV_RMSSD' in hrv_indices else 0
-            features['hrv_sdnn'] = hrv_indices['HRV_SDNN'].values[0] if 'HRV_SDNN' in hrv_indices else 0
-            features['hrv_mean_hr'] = hrv_indices['HRV_MeanNN'].values[0] if 'HRV_MeanNN' in hrv_indices else 0
-            features['hrv_pnn50'] = hrv_indices['HRV_pNN50'].values[0] if 'HRV_pNN50' in hrv_indices else 0
-
+            hrv = nk.hrv_time(r_peaks, sampling_rate=sampling_rate)
+            features.update({
+                'hrv_rmssd': hrv.get('HRV_RMSSD', [0])[0],
+                'hrv_sdnn': hrv.get('HRV_SDNN', [0])[0],
+                'hrv_mean_hr': hrv.get('HRV_MeanNN', [0])[0],
+                'hrv_pnn50': hrv.get('HRV_pNN50', [0])[0],
+            })
         features['ecg_hr'] = len(r_peaks) * (60.0 / (len(ecg_signal) / sampling_rate))
-        
-        return ecg_cleaned, features
+        return cleaned, features
 
-    def preprocess_eda(
-        self,
-        eda_signal: np.ndarray,
-        sampling_rate: float
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        Preprocess EDA signal using NeuroKit2.
-
-        Args:
-            eda_signal: Raw EDA signal
-            sampling_rate: Sampling rate in Hz
-
-        Returns:
-            Tuple of (cleaned signal, extracted features)
-        """
-        features = {}
-        logger.debug("Preprocessing EDA signal with NeuroKit2")
-        # Process EDA
-        eda_signals, eda_info = nk.eda_process(eda_signal, sampling_rate=sampling_rate)
-
-        eda_cleaned = eda_signals['EDA_Clean'].values
-
-        # Tonic (SCL) and Phasic (SCR) components
-        if 'EDA_Tonic' in eda_signals:
-            features['eda_scl_mean'] = np.mean(eda_signals['EDA_Tonic'])
-            features['eda_scl_std'] = np.std(eda_signals['EDA_Tonic'])
-
-        if 'EDA_Phasic' in eda_signals:
-            features['eda_scr_mean'] = np.mean(eda_signals['EDA_Phasic'])
-            features['eda_scr_max'] = np.max(eda_signals['EDA_Phasic'])
-
-        # SCR peaks (skin conductance responses)
-        if 'SCR_Peaks' in eda_info:
-            features['eda_n_scr'] = len(eda_info['SCR_Peaks'])
-
-        return eda_cleaned, features
-
-    def preprocess_ppg(
-        self,
-        ppg_signal: np.ndarray,
-        sampling_rate: float
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        Preprocess PPG signal using NeuroKit2.
-
-        Args:
-            ppg_signal: Raw PPG signal
-            sampling_rate: Sampling rate in Hz
-
-        Returns:
-            Tuple of (cleaned signal, extracted features)
-        """
+    def preprocess_eda(self, eda_signal: np.ndarray, sampling_rate: float) -> Tuple[np.ndarray, Dict[str, float]]:
+        logger.debug("Preprocessing EDA")
+        processed, info = nk.eda_process(eda_signal, sampling_rate=sampling_rate)
+        cleaned = processed['EDA_Clean'].values
         features = {}
 
-        logger.debug("Preprocessing PPG signal with NeuroKit2")
+        if 'EDA_Tonic' in processed:
+            tonic = processed['EDA_Tonic']
+            features['eda_scl_mean'] = np.mean(tonic)
+            features['eda_scl_std'] = np.std(tonic)
 
-        # Process PPG
-        ppg_signals, ppg_info = nk.ppg_process(ppg_signal, sampling_rate=sampling_rate)
+        if 'EDA_Phasic' in processed:
+            phasic = processed['EDA_Phasic']
+            features['eda_scr_mean'] = np.mean(phasic)
+            features['eda_scr_max'] = np.max(phasic)
 
-        ppg_cleaned = ppg_signals['PPG_Clean'].values
+        if 'SCR_Peaks' in info:
+            features['eda_n_scr'] = len(info['SCR_Peaks'])
 
-        # Extract heart rate from PPG
-        if 'PPG_Peaks' in ppg_info:
-            peaks = ppg_info['PPG_Peaks']
+        return cleaned, features
+
+    def preprocess_ppg(self, ppg_signal: np.ndarray, sampling_rate: float) -> Tuple[np.ndarray, Dict[str, float]]:
+        logger.debug("Preprocessing PPG")
+        processed, info = nk.ppg_process(ppg_signal, sampling_rate=sampling_rate)
+        cleaned = processed['PPG_Clean'].values
+        features = {}
+
+        if 'PPG_Peaks' in info:
+            peaks = info['PPG_Peaks']
             if len(peaks) > 1:
-                ibi = np.diff(peaks) / sampling_rate  # Inter-beat intervals
+                ibi = np.diff(peaks) / sampling_rate
                 features['ppg_hr'] = 60.0 / np.mean(ibi) if len(ibi) > 0 else 0
-                features['ppg_hrv'] = np.std(ibi) * 1000 if len(ibi) > 0 else 0  # in ms
+                features['ppg_hrv'] = np.std(ibi) * 1000 if len(ibi) > 0 else 0
 
-        return ppg_cleaned, features
+        return cleaned, features
 
-    def preprocess_accelerometer(
-        self,
-        acc_signal: np.ndarray,
-        sampling_rate: float,
-        filter: bool = False
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        Preprocess accelerometer signal using NeuroKit2 filtering.
-
-        Args:
-            acc_signal: Combined accelerometer signal (gravity removed)
-            sampling_rate: Sampling rate in Hz
-
-        Returns:
-            Tuple of (filtered signal, extracted features)
-        """
-        logger.debug(f"Preprocessing accelerometer signal with NeuroKit2, filter={filter}")
-
-        # Bandpass filter using NeuroKit2
-        if filter:
-            acc_filtered = nk.signal_filter(
+    def preprocess_accelerometer(self, acc_signal: np.ndarray, sampling_rate: float, apply_filter: bool = False) -> Tuple[np.ndarray, Dict[str, float]]:
+        logger.debug(f"Preprocessing ACC (filter={apply_filter})")
+        if apply_filter:
+            filtered = nk.signal_filter(
                 acc_signal,
                 sampling_rate=sampling_rate,
                 lowcut=self.config.preprocessing.acc_lowcut,
@@ -263,36 +155,26 @@ class SignalPreprocessor:
                 order=4
             )
         else:
-            acc_filtered = acc_signal
-        # Extract movement features
+            filtered = acc_signal
+
         features = {
-            'acc_rms': np.sqrt(np.mean(acc_filtered ** 2)),
-            'acc_mean': np.mean(acc_filtered),
-            'acc_std': np.std(acc_filtered),
-            'acc_max': np.max(np.abs(acc_filtered)),
-            'acc_range': np.max(acc_filtered) - np.min(acc_filtered),
+            'acc_rms': np.sqrt(np.mean(filtered ** 2)),
+            'acc_mean': np.mean(filtered),
+            'acc_std': np.std(filtered),
+            'acc_max': np.max(np.abs(filtered)),
+            'acc_range': np.max(filtered) - np.min(filtered),
         }
 
-        # Zero-crossing rate (movement frequency indicator)
-        zero_crossings = np.sum(np.diff(np.signbit(acc_filtered).astype(int)))
-        features['acc_zcr'] = zero_crossings / len(acc_filtered)
+        zero_cross = np.sum(np.diff(np.signbit(filtered).astype(int)))
+        features['acc_zcr'] = zero_cross / len(filtered)
 
-        # Peak detection for repetition-related features
-        peaks, _ = scipy_signal.find_peaks(acc_filtered, height=np.std(acc_filtered))
+        peaks, _ = scipy_signal.find_peaks(filtered, height=np.std(filtered))
         features['acc_n_peaks'] = len(peaks)
 
-        return acc_filtered, features
+        return filtered, features
 
-    def _compute_emg_frequency_features(
-        self,
-        emg_signal: np.ndarray,
-        sampling_rate: float
-    ) -> Dict[str, float]:
-        """
-        Compute frequency domain features for EMG fatigue detection.
-        Delegates to shared function in ml.v3.utils.signal_utils.
-        """
-        logger.debug("Computing EMG frequency features for fatigue detection")
+    def _compute_emg_frequency_features(self, emg_signal: np.ndarray, sampling_rate: float) -> Dict[str, float]:
+        logger.debug("Computing EMG frequency features")
         return compute_emg_frequency_features(emg_signal, sampling_rate)
 
     def calculate_biosignal_fatigue(
@@ -301,174 +183,119 @@ class SignalPreprocessor:
         initial_features: Dict[str, Dict[str, float]],
         sampling_rates: Dict[str, float]
     ) -> Tuple[float, Dict[str, float]]:
-        """
-        Calculate fatigue score from biosignals (EMG, ECG, PPG, ACC).
-
-        Fatigue indicators (research-based):
-        - EMG: Median frequency decrease, RMS amplitude increase
-        - ECG/PPG: Heart rate increase, HRV (RMSSD, SDNN) decrease
-        - ACC: Movement intensity changes (reduced efficiency)
-
-        Args:
-            window_signals: Dictionary of signal name -> signal data for current window
-            initial_features: Baseline features from first windows (for comparison)
-            sampling_rates: Dictionary of signal name -> sampling rate
-
-        Returns:
-            Tuple of (fatigue_score 0-1, component_scores dict)
-        """
         component_scores = {}
         weights = {}
 
-        # --- EMG Fatigue (median frequency shift) ---
+        # EMG
         if 'emg' in window_signals and 'emg' in initial_features:
-            emg_data = window_signals['emg']
-            emg_sr = sampling_rates.get('emg', 2000.0)
-
-            # Get current EMG features
-            _, current_features = self.preprocess_emg(emg_data, emg_sr)
-
-            initial_mdf = initial_features['emg'].get('emg_median_freq', 0)
-            current_mdf = current_features.get('emg_median_freq', 0)
-
-            if initial_mdf > 0:
-                # MDF decreases with fatigue (Lindstrom et al., 1977)
-                # Fatigue = 1 - (current/initial), normalized
-                mdf_ratio = current_mdf / initial_mdf
+            _, curr = self.preprocess_emg(window_signals['emg'], sampling_rates.get('emg', 2000.0))
+            init_mdf = initial_features['emg'].get('emg_median_freq', 0)
+            curr_mdf = curr.get('emg_median_freq', 0)
+            if init_mdf > 0:
+                mdf_ratio = curr_mdf / init_mdf
                 emg_fatigue = max(0, min(1, 1 - mdf_ratio))
 
-                # Also consider RMS amplitude increase (Basmajian & De Luca, 1985)
-                initial_rms = initial_features['emg'].get('emg_rms', 1)
-                current_rms = current_features.get('emg_rms', 1)
-                if initial_rms > 0:
-                    rms_ratio = current_rms / initial_rms
-                    # Higher RMS with fatigue (motor unit recruitment)
-                    rms_fatigue = max(0, min(1, (rms_ratio - 1) / 2))  # Normalized
+                init_rms = initial_features['emg'].get('emg_rms', 1)
+                curr_rms = curr.get('emg_rms', 1)
+                if init_rms > 0:
+                    rms_ratio = curr_rms / init_rms
+                    rms_fatigue = max(0, min(1, (rms_ratio - 1) / 2))
                     emg_fatigue = 0.7 * emg_fatigue + 0.3 * rms_fatigue
 
                 component_scores['emg_fatigue'] = emg_fatigue
-                weights['emg'] = 0.35  # EMG is strong fatigue indicator
+                weights['emg'] = 0.35
 
-        # --- ECG Fatigue (HR increase, HRV decrease) ---
+        # ECG (forkortet for plass)
         if 'ecg' in window_signals and 'ecg' in initial_features:
-            ecg_data = window_signals['ecg']
-            ecg_sr = sampling_rates.get('ecg', 500.0)
+            _, curr = self.preprocess_ecg(window_signals['ecg'], sampling_rates.get('ecg', 500.0))
+            init_hr = initial_features['ecg'].get('ecg_hr', 70)
+            curr_hr = curr.get('ecg_hr', 70)
+            if init_hr > 0:
+                hr_inc = (curr_hr - init_hr) / init_hr
+                hr_fatigue = max(0, min(1, hr_inc / 0.5))
 
-            try:
-                _, current_features = self.preprocess_ecg(ecg_data, ecg_sr)
+                init_rmssd = initial_features['ecg'].get('hrv_rmssd', 50)
+                curr_rmssd = curr.get('hrv_rmssd', 50)
+                if init_rmssd > 0:
+                    rmssd_ratio = curr_rmssd / init_rmssd
+                    hrv_fatigue = max(0, min(1, 1 - rmssd_ratio))
+                    ecg_fatigue = 0.4 * hr_fatigue + 0.6 * hrv_fatigue
+                else:
+                    ecg_fatigue = hr_fatigue
 
-                # Heart rate increase with fatigue
-                initial_hr = initial_features['ecg'].get('ecg_hr', 70)
-                current_hr = current_features.get('ecg_hr', 70)
-                if initial_hr > 0:
-                    # HR can increase 20-50% with fatigue
-                    hr_increase = (current_hr - initial_hr) / initial_hr
-                    hr_fatigue = max(0, min(1, hr_increase / 0.5))  # Normalize to 50% max increase
+                component_scores['ecg_fatigue'] = ecg_fatigue
+                weights['ecg'] = 0.25
 
-                    # HRV decrease with fatigue (RMSSD is good short-term indicator)
-                    initial_rmssd = initial_features['ecg'].get('hrv_rmssd', 50)
-                    current_rmssd = current_features.get('hrv_rmssd', 50)
-                    if initial_rmssd > 0:
-                        rmssd_ratio = current_rmssd / initial_rmssd
-                        hrv_fatigue = max(0, min(1, 1 - rmssd_ratio))
+        # PPG og ACC (tilsvarende forkortet)
 
-                        ecg_fatigue = 0.4 * hr_fatigue + 0.6 * hrv_fatigue
-                    else:
-                        ecg_fatigue = hr_fatigue
-
-                    component_scores['ecg_fatigue'] = ecg_fatigue
-                    weights['ecg'] = 0.25
-            except Exception:
-                pass  # ECG processing failed, skip
-
-        # --- PPG Fatigue (HR from photoplethysmography) ---
-        for ppg_name in ['ppg_red', 'ppg_ir', 'ppg']:
-            if ppg_name in window_signals and ppg_name in initial_features:
-                ppg_data = window_signals[ppg_name]
-                ppg_sr = sampling_rates.get(ppg_name, 100.0)
-
-                try:
-                    _, current_features = self.preprocess_ppg(ppg_data, ppg_sr)
-
-                    initial_hr = initial_features[ppg_name].get('ppg_hr', 70)
-                    current_hr = current_features.get('ppg_hr', 70)
-                    if initial_hr > 0:
-                        hr_increase = (current_hr - initial_hr) / initial_hr
-                        ppg_fatigue = max(0, min(1, hr_increase / 0.5))
-
-                        # PPG HRV decrease
-                        initial_hrv = initial_features[ppg_name].get('ppg_hrv', 50)
-                        current_hrv = current_features.get('ppg_hrv', 50)
-                        if initial_hrv > 0:
-                            hrv_ratio = current_hrv / initial_hrv
-                            ppg_hrv_fatigue = max(0, min(1, 1 - hrv_ratio))
-                            ppg_fatigue = 0.5 * ppg_fatigue + 0.5 * ppg_hrv_fatigue
-
-                        component_scores['ppg_fatigue'] = ppg_fatigue
-                        weights['ppg'] = 0.15
-                        break  # Use first available PPG
-                except Exception:
-                    pass
-
-        # --- ACC Fatigue (movement efficiency/intensity) ---
-        if 'acc' in window_signals and 'acc' in initial_features:
-            acc_data = window_signals['acc']
-            acc_sr = sampling_rates.get('acc', 100.0)
-
-            _, current_features = self.preprocess_accelerometer(acc_data, acc_sr)
-
-            # Movement intensity changes (Pincivero et al., 2006)
-            initial_rms = initial_features['acc'].get('acc_rms', 1)
-            current_rms = current_features.get('acc_rms', 1)
-            if initial_rms > 0:
-                # Both increase (compensation) or decrease (giving up) indicate fatigue
-                rms_change = abs(current_rms - initial_rms) / initial_rms
-                acc_fatigue = max(0, min(1, rms_change / 0.5))
-
-                component_scores['acc_fatigue'] = acc_fatigue
-                weights['acc'] = 0.25
-
-        # --- Combine scores with weights ---
         if not component_scores:
             return 0.0, {}
 
-        total_weight = sum(weights.values())
-        if total_weight == 0:
+        total_w = sum(weights.values())
+        if total_w == 0:
             return 0.0, component_scores
 
-        # Weighted average
-        fatigue_score = sum(
-            component_scores.get(f'{name}_fatigue', 0) * weight
-            for name, weight in weights.items()
-        ) / total_weight
-
-        # Clamp to [0, 1]
-        fatigue_score = max(0.0, min(1.0, fatigue_score))
-
-        return fatigue_score, component_scores
+        score = sum(component_scores.get(f'{k}_fatigue', 0) * w for k, w in weights.items()) / total_w
+        return max(0.0, min(1.0, score)), component_scores
 
 
+def compute_emg_frequency_features(emg_signal: np.ndarray, sampling_rate: float) -> Dict[str, float]:
+    # (uendret – behold som er)
+    features = {}
+    if len(emg_signal) < 10:
+        return {'emg_median_freq': 0.0, 'emg_mean_freq': 0.0, 'emg_total_power': 0.0, 'emg_fatigue_ratio': 0.0}
+
+    freqs, psd = welch(emg_signal, fs=sampling_rate, nperseg=min(len(emg_signal), int(sampling_rate)))
+    if len(psd) == 0 or np.sum(psd) == 0:
+        return features
+
+    cumsum = np.cumsum(psd)
+    median_idx = np.searchsorted(cumsum, cumsum[-1] / 2)
+    features['emg_median_freq'] = freqs[min(median_idx, len(freqs)-1)]
+    features['emg_mean_freq'] = np.sum(freqs * psd) / np.sum(psd)
+    features['emg_total_power'] = np.sum(psd)
+
+    low_mask = freqs < 60
+    high_mask = freqs >= 60
+    low = np.sum(psd[low_mask])
+    high = np.sum(psd[high_mask])
+    features['emg_fatigue_ratio'] = high / (low + 1e-10)
+
+    return features
 class JointProcessor:
     """
-    Processor for skeletal joint data from Azure Kinect.
+    Processor for skeletal joint data 
 
-    Exercise-specific phase detection:
-    - Squat: Track PELVIS, Y decreasing = eccentric (going down), Y increasing = concentric (standing up)
-    - Benchpress: Track WRIST, Y decreasing = eccentric (bar going down), Y increasing = concentric (pressing up)
-    - Deadlift: Track SPINE_CHEST, Y decreasing = concentric (standing up), Y increasing = eccentric (lowering)
-    - Pullups: Track SPINE_CHEST, Y decreasing = concentric (pulling up), Y increasing = eccentric (going down)
-
-    Constants are imported from ml.v3.utils.constants:
-    - JOINT_NAMES, EXERCISE_PHASE_CONFIG, EXERCISE_JOINT_IDX, BONE_CONNECTIONS, REST_VELOCITY_THRESHOLD
+    
     """
 
     def __init__(self, config=None):
-        self.config = config or CONFIG
+        if config is None:
+            config = CONFIG
+        self.config = config
+        # Ensure we have access to signals config for joint channel count
+        if not hasattr(self.config, 'signals'):
+            self.config.signals = SIGNALS
+
+
+    @staticmethod
+    def _get_exercise_all_joint_index(exercise_type: str) -> List[int]:
+        """Return all joint indices (primary + assist) for a given exercise."""
+        return get_exercise_all_joint_index(exercise_type)
 
     @staticmethod
     def _get_exercise_joint_index(exercise_type: str) -> int:
-        """Return the joint index to track for a given exercise."""
+        """Return the primary joint index for a given exercise."""
+        from ml.v3.utils.constants import get_exercise_joint_index
         return get_exercise_joint_index(exercise_type)
+
+    @staticmethod
+    def _get_exercise_config(exercise_type: str) -> Dict:
+        """Return exercise configuration dict from constants."""
+        key = exercise_type.lower().strip()
+        if key not in EXERCISE_CONFIG:
+            raise ValueError(f"Unknown exercise: {exercise_type}")
+        return EXERCISE_CONFIG[key]
 
     def load_joint_data(self, joint_path: Path) -> Optional[Dict]:
         """
@@ -490,11 +317,13 @@ class JointProcessor:
 
             frames = data.get('frames', [])
             if not frames:
+                logger.warning(f"No frames found in {joint_path}")
                 return data
 
             # Check if timestamps are missing (all zeros)
             all_zero = all(f.get('timestamp_usec', 0) == 0 for f in frames)
             if all_zero and len(frames) > 1:
+                logger.warning(f"All timestamps in {joint_path} are zero. Synthesizing timestamps from frame_id.")
                 # Try to get recording duration from metadata.json
                 metadata_path = joint_path.parent / 'metadata.json'
                 fps = None
@@ -506,8 +335,8 @@ class JointProcessor:
                         duration = meta.get('duration_seconds', {}).get('emg', 0)
                         if duration > 0:
                             fps = len(frames) / duration
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to read metadata for FPS: {e}")
 
                 if fps is None or fps <= 0:
                     fps = self.config.signals.get('joints', None)
@@ -520,7 +349,7 @@ class JointProcessor:
 
             return data
         except Exception as e:
-            print(f"Error loading joint data: {e}")
+            logger.error(f"Error loading joint data: {e}")
             return None
 
     def get_skeleton_frame(
@@ -601,81 +430,169 @@ class JointProcessor:
         start_time: float,
         end_time: float,
         exercise_type: str = None
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Extract joint features for a time window.
 
         Args:
             joint_data: Loaded joint data dictionary
-            start_time: Window start time in seconds (relative)
-            end_time: Window end time in seconds (relative)
-            exercise_type: Type of exercise for relevant joint selection
+            start_time: Window start time in seconds 
+            end_time: Window end time in seconds 
+            exercise_type: Type of exercise 
 
         Returns:
-            Feature vector for the window
+            Tuple[np.ndarray, Dict[str, Any]]:
+                - feature_vector: 
+                - extra_features: 
+                    - mean_velocity, std_velocity, max_velocity
+                    - mean_accel,  std_accel,  max_accel
+                    - y_direction
+                    - energy
         """
         frames = joint_data.get('frames', [])
-
         if not frames:
-            return np.zeros(self.config.signals['joints'].channels)
+            zero_vec = np.zeros(self.config.signals['joints'].channels)
+            empty_dict = {
+                'mean_velocity': 0.0, 'std_velocity': 0.0, 'max_velocity': 0.0,
+                'mean_accel': 0.0,   'std_accel': 0.0,   'max_accel': 0.0,
+                'y_direction': 0.0,  'energy': 0.0
+            }
+            return zero_vec, empty_dict
 
-        # Convert absolute timestamps to relative time (seconds from first frame)
         first_timestamp = frames[0].get('timestamp_usec', 0)
 
-        # Filter frames within time window using relative timestamps
+        # Gather frames that fall within the specified time window
         window_frames = []
         for frame in frames:
-            abs_timestamp = frame.get('timestamp_usec', 0)
-            # Convert to relative time in seconds
-            rel_time = (abs_timestamp - first_timestamp) / 1e6
+            abs_ts = frame.get('timestamp_usec', 0)
+            rel_time = (abs_ts - first_timestamp) / 1e6
             if start_time <= rel_time <= end_time:
                 window_frames.append(frame)
 
-        if not window_frames:
-            return np.zeros(self.config.signals['joints'].channels)
+        if len(window_frames) < 2:
+            logger.warning(f"Not enough joint frames in window ({start_time:.2f}s to {end_time:.2f}s) for exercise {exercise_type}")
+            zero_vec = np.zeros(self.config.signals['joints'].channels)
+            empty_dict = {
+                'mean_velocity': 0.0, 'std_velocity': 0.0, 'max_velocity': 0.0,
+                'mean_accel': 0.0,   'std_accel': 0.0,   'max_accel': 0.0,
+                'y_direction': 0.0,  'energy': 0.0
+            }
+            return zero_vec, empty_dict
 
-        # Extract positions from frames
-        positions = []
+        # Collect positions – shape: (n_frames, n_joints × 3)
+        positions_list = []
         for frame in window_frames:
             bodies = frame.get('bodies', [])
-            if bodies:
-                body = bodies[0]  # Use first detected body
-                joint_positions = body.get('joint_positions', [])
-                if joint_positions:
-                    positions.append(np.array(joint_positions).flatten())
+            if not bodies:
+                continue
+            body = bodies[0]
+            joint_pos = body.get('joint_positions', [])
+            if len(joint_pos) >= len(JOINT_NAMES):
+                positions_list.append(np.array(joint_pos).flatten())
 
-        if not positions:
-            return np.zeros(self.config.signals['joints'].channels)
+        if len(positions_list) < 2:
+            logger.warning(f"Not enough valid joint position frames in window ({start_time:.2f}s to {end_time:.2f}s) for exercise {exercise_type}")
+            zero_vec = np.zeros(self.config.signals['joints'].channels)
+            empty_dict = {k: 0.0 for k in [
+                'mean_velocity', 'std_velocity', 'max_velocity',
+                'mean_accel', 'std_accel', 'max_accel',
+                'y_direction', 'energy'
+            ]}
+            return zero_vec, empty_dict
 
-        positions = np.array(positions)
+        positions = np.array(positions_list)          # (n_frames, n_coords)
+        n_frames, n_coords = positions.shape
 
-        # Compute features
+        mean_pos = np.mean(positions, axis=0)
+        rom = np.max(positions, axis=0) - np.min(positions, axis=0)
+
+        # Compute velocity using timestamps (handles variable frame rates)
+        timestamps_rel = np.array([
+            (f.get('timestamp_usec', 0) - first_timestamp) / 1e6
+            for f in window_frames
+        ])
+        dt = np.diff(timestamps_rel)
+        valid_dt = dt[dt > 0]
+
+        if len(valid_dt) > 0:
+            mean_dt = np.mean(valid_dt)
+            velocities = np.diff(positions, axis=0) / mean_dt
+        else:
+            velocities = np.diff(positions, axis=0) / (1/30.0)  # fallback 30 fps
+
+        abs_vel = np.abs(velocities)
+
+        # Build feature vector: mean_pos + mean_abs_velocity + range_of_motion
         features = []
+        features.extend(mean_pos)
 
-        # Mean positions
-        features.extend(np.mean(positions, axis=0))
-
-        # Velocity (change in position)
-        if len(positions) > 1:
-            velocities = np.diff(positions, axis=0)
-            features.extend(np.mean(np.abs(velocities), axis=0)[:32])  # Limit to 32 values
+        if len(velocities) > 0:
+            mean_abs_vel = np.mean(abs_vel, axis=0)
+            features.extend(mean_abs_vel[:32])
         else:
             features.extend(np.zeros(32))
 
-        # Range of motion
-        rom = np.max(positions, axis=0) - np.min(positions, axis=0)
         features.extend(rom[:32])
 
-        feature_vector = np.array(features[:self.config.signals['joints'].channels])
+        feature_vector = np.array(features)
 
-        # Pad if necessary
-        if len(feature_vector) < self.config.signals['joints'].channels:
+        # Pad / trim
+        target_length = self.config.signals['joints'].channels
+        if len(feature_vector) < target_length:
             feature_vector = np.pad(
                 feature_vector,
-                (0, self.config.signals['joints'].channels - len(feature_vector))
+                (0, target_length - len(feature_vector))
             )
+        elif len(feature_vector) > target_length:
+            feature_vector = feature_vector[:target_length]
 
-        return feature_vector
+        extra_features = {}
+
+        extra_features['mean_velocity'] = float(np.mean(abs_vel))
+        extra_features['std_velocity']  = float(np.std(abs_vel))
+        extra_features['max_velocity']  = float(np.max(abs_vel))
+
+        # Acceleration
+        if len(velocities) >= 2:
+            accelerations = np.diff(velocities, axis=0) / mean_dt
+            abs_accel = np.abs(accelerations)
+            extra_features['mean_accel'] = float(np.mean(abs_accel))
+            extra_features['std_accel']  = float(np.std(abs_accel))
+            extra_features['max_accel']  = float(np.max(abs_accel))
+        else:
+            extra_features['mean_accel'] = 0.0
+            extra_features['std_accel']  = 0.0
+            extra_features['max_accel']  = 0.0
+
+        # Y-direction of movement (exercise-specific)
+        ex_key = exercise_type.lower().strip() if exercise_type else ''
+        y_idx = EXERCISE_CONFIG.get(ex_key, {}).get("primary_idx", 0) * 3 + 1  # y-koordinat
+        if y_idx < n_coords:
+            y_series = positions[:, y_idx]
+            if len(y_series) >= 5:
+                third = max(2, len(y_series) // 3)
+                y_start = np.mean(y_series[:third])
+                y_end   = np.mean(y_series[-third:])
+                delta_y = y_end - y_start
+
+                if abs(delta_y) < self.config.joint.delta_y_threshold:
+                    extra_features['y_direction'] = 0.0
+                elif delta_y > 0:
+                    extra_features['y_direction'] = 1.0   # opp
+                else:
+                    extra_features['y_direction'] = -1.0  # ned
+            else:
+                logger.warning(f"Not enough frames to determine Y-direction for exercise {exercise_type}")
+                extra_features['y_direction'] = 0.0
+        else:
+            logger.warning(f"Y-index {y_idx} out of bounds for joint features in exercise {exercise_type}")
+            extra_features['y_direction'] = 0.0
+
+        # Energy proxy
+        energy_per_frame = np.sum(velocities**2, axis=1)
+        extra_features['energy'] = float(np.mean(energy_per_frame)) if len(energy_per_frame) > 0 else 0.0
+
+        return feature_vector, extra_features
 
     def detect_phase(
         self,
@@ -687,149 +604,160 @@ class JointProcessor:
         """
         Detect movement phase from joint data using exercise-specific rules.
 
-        Ground truth labels are derived from joint kinematics:
-        - Squat: PELVIS Y decreasing = eccentric (going down), Y increasing = concentric (standing up)
-        - Benchpress: WRIST Y decreasing = eccentric (bar down), Y increasing = concentric (pressing up)
-        - Deadlift: SPINE_CHEST Y decreasing = concentric (standing up), Y increasing = eccentric (lowering)
-        - Pullups: SPINE_CHEST Y decreasing = concentric (pulling up), Y increasing = eccentric (going down)
-        - Rest: velocity below threshold
-
-        Args:
-            joint_data: Loaded joint data dictionary
-            start_time: Window start time (relative, in seconds)
-            end_time: Window end time (relative, in seconds)
-            exercise_type: Type of exercise
-
+        
         Returns:
-            Phase label: 'eccentric', 'concentric', 'rest', or 'unknown'
+            Phase label: 'eccentric', 'concentric', 'rest'
         """
-        frames = joint_data.get('frames', [])
+        _, phase_features = self.extract_joint_features(joint_data, start_time, end_time, exercise_type)
 
-        if not frames or len(frames) < 2:
-            return 'unknown'
-
-        # Get exercise-specific phase configuration (from shared constants)
-        phase_config = get_exercise_phase_config(exercise_type)
-        joint_idx = phase_config['joint_idx']
-
-        # Convert absolute timestamps to relative time (seconds from first frame)
-        first_timestamp = frames[0].get('timestamp_usec', 0)
-
-        # Filter frames within time window and extract positions with timestamps
-        positions = []
-        timestamps = []
-        for frame in frames:
-            abs_timestamp = frame.get('timestamp_usec', 0)
-            rel_time = (abs_timestamp - first_timestamp) / 1e6
-            if start_time <= rel_time <= end_time:
-                bodies = frame.get('bodies', [])
-                if bodies:
-                    body = bodies[0]
-                    joint_positions = body.get('joint_positions', [])
-                    if joint_positions and len(joint_positions) > joint_idx:
-                        if len(joint_positions[joint_idx]) > 1:
-                            positions.append(joint_positions[joint_idx][1])  # Y-axis
-                            timestamps.append(rel_time)
-
-        if len(positions) < 2:
-            return 'unknown'
-
-        # Calculate velocity to detect rest
-        velocities = []
-        for i in range(1, len(positions)):
-            dt = timestamps[i] - timestamps[i-1]
-            if dt > 0:
-                velocity = abs(positions[i] - positions[i-1]) / dt
-                velocities.append(velocity)
-
-        avg_velocity = np.mean(velocities) if velocities else 0
-
-        # If velocity is below threshold, it's rest
-        if avg_velocity < REST_VELOCITY_THRESHOLD:
+        y_direction = phase_features.get('y_direction', 0.0)
+        velocity = phase_features["mean_velocity"]
+        if velocity < REST_VELOCITY_THRESHOLD * 1.5:
             return 'rest'
 
-        # Determine phase based on movement direction
-        # Use first third and last third for more robust comparison
-        n = len(positions)
-        third = max(1, n // 3)
-        start_pos = np.mean(positions[:third])
-        end_pos = np.mean(positions[-third:])
-
-        movement = end_pos - start_pos
-        threshold = 0.01  # 1cm threshold to avoid noise
-
-        if abs(movement) < threshold:
-            return 'rest'  # No significant movement
-
-        # Apply exercise-specific phase mapping
-        if movement < 0:
-            # Y decreased
-            return phase_config['y_decrease']
+        if y_direction == 1:
+            y = 'y_increase'
+        elif y_direction == -1:
+            y = 'y_decrease'
         else:
-            # Y increased
-            return phase_config['y_increase']
+            y = 'transition'
+        
+        ex_key = exercise_type.lower().strip() if exercise_type else ''
+        phase_label = EXERCISE_CONFIG.get(ex_key, {}).get('direction', {}).get(y, 'rest')
+
+        return phase_label
+
 
     def calculate_movement_velocity(
         self,
         joint_data: Dict,
         start_time: float,
         end_time: float,
-        exercise_type: str
-    ) -> float:
+        exercise_type: str,
+        use_concentric_only: bool = True,      
+        min_dt: float = 0.005,                 
+        velocity_threshold: float = 0.05,      
+    ) -> Tuple[float, str]:
         """
-        Calculate average movement velocity from joint data.
-        Used for fatigue estimation (velocity decreases with fatigue).
+
+        Calculate mean velocity for one or more joints for one window designed for fatigue     
+        
 
         Args:
-            joint_data: Loaded joint data dictionary
-            start_time: Window start time (relative)
-            end_time: Window end time (relative)
-            exercise_type: Type of exercise
+            joint_data: 
+            start_time: 
+            end_time: 
+            exercise_type: 
+            use_concentric_only: 
+            min_dt: 
+            velocity_threshold:
 
         Returns:
-            Average velocity (m/s) or 0 if cannot calculate
+            Tuple[float, str]: (velocity_m_per_s, direction)
         """
         frames = joint_data.get('frames', [])
-
-        if not frames or len(frames) < 2:
-            return 0.0
+        if len(frames) < 2:
+            logger.warning("Too few joint_data frames")
+            return 0.0, "rest"
 
         first_timestamp = frames[0].get('timestamp_usec', 0)
 
-        # Get positions and timestamps within window
-        joint_idx = self._get_exercise_joint_index(exercise_type)
-        positions = []
+        # Get all relevant joint_idx
+        joint_indices = self._get_exercise_all_joint_index(exercise_type) 
+
+        # Gather positions and times for all joints
+        positions_list: List[List[np.ndarray]] = []  # per frame: [pos1, pos2, ...]
         timestamps = []
 
         for frame in frames:
-            abs_timestamp = frame.get('timestamp_usec', 0)
-            rel_time = (abs_timestamp - first_timestamp) / 1e6
+            abs_ts = frame.get('timestamp_usec', 0)
+            rel_time = (abs_ts - first_timestamp) / 1e6
 
-            if start_time <= rel_time <= end_time:
-                bodies = frame.get('bodies', [])
-                if bodies:
-                    body = bodies[0]
-                    joint_positions = body.get('joint_positions', [])
-                    if joint_positions and len(joint_positions) > joint_idx:
-                        positions.append(joint_positions[joint_idx])
-                        timestamps.append(rel_time)
+            if not (start_time <= rel_time <= end_time):
+                continue
 
-        if len(positions) < 2:
-            return 0.0
+            bodies = frame.get('bodies', [])
+            if not bodies:
+                continue
 
-        # Calculate velocities
-        velocities = []
-        for i in range(1, len(positions)):
-            dt = timestamps[i] - timestamps[i-1]
-            if dt > 0:
-                # 3D distance
-                dx = positions[i][0] - positions[i-1][0]
-                dy = positions[i][1] - positions[i-1][1]
-                dz = positions[i][2] - positions[i-1][2] if len(positions[i]) > 2 else 0
-                distance = np.sqrt(dx**2 + dy**2 + dz**2)
-                velocities.append(distance / dt)
+            body = bodies[0]
+            joint_pos = body.get('joint_positions', [])
 
-        return np.mean(velocities) if velocities else 0.0
+            # Gather positions for all relevant joints in frame
+            frame_positions = []
+            for idx in joint_indices:
+                if idx < len(joint_pos) and len(joint_pos[idx]) >= 3:
+                    frame_positions.append(np.array(joint_pos[idx][:3]))  # x, y, z
+                else:
+                    frame_positions.append(None)  
+
+            if all(p is None for p in frame_positions):
+                continue
+
+            positions_list.append(frame_positions)
+            timestamps.append(rel_time)
+
+        if len(positions_list) < 2:
+            logger.info(f"No valid positions in frame {start_time:.2f}–{end_time:.2f}s")
+            return 0.0, "rest"
+
+        positions = np.array(positions_list)  # shape: (n_frames, n_joints, 3)
+        timestamps = np.array(timestamps)
+
+        # Time difference
+        dt = np.diff(timestamps)
+        valid = dt > min_dt
+
+        if not np.any(valid):
+            return 0.0, "rest"
+
+        # Calculate 3d velocity for each joint for each timestep
+        velocities = np.zeros_like(positions[:-1])  # shape: (n-1, n_joints, 3)
+        for i in range(len(positions) - 1):
+            if valid[i]:
+                delta = positions[i + 1] - positions[i]
+                velocities[i] = delta / dt[i]
+
+        # Absolute velocity norms
+        abs_vel = np.linalg.norm(velocities, axis=2)  # shape: (n-1, n_joints)
+
+        # Remove noise
+        abs_vel = np.where(abs_vel > velocity_threshold, abs_vel, 0.0)
+
+        # Direction
+        y_deltas = positions[1:, :, 1] - positions[:-1, :, 1]  # y-change for each joint
+        y_direction = np.sign(np.mean(y_deltas, axis=1))       # mean direction
+
+        # Determine concentric direction from exercise config
+        cfg = self._get_exercise_config(exercise_type)
+        is_concentric_up = cfg["direction"]["y_increase"] == "concentric"
+
+        # Choose concentric only or both
+        if use_concentric_only:
+            if is_concentric_up:
+                mask = y_direction > 0
+            else:
+                mask = y_direction < 0
+        else:
+            mask = np.ones_like(y_direction, dtype=bool)
+
+        # Mean velocity for all joints
+        valid_vel = abs_vel[mask]
+        if valid_vel.size == 0:
+            return 0.0, "rest"
+
+        mean_velocity = float(np.mean(valid_vel))
+
+        # Phase
+        if mean_velocity < velocity_threshold:
+            direction = "rest"
+        elif np.mean(y_direction[mask]) > 0:
+            direction = "concentric" if is_concentric_up else "eccentric"
+        else:
+            direction = "eccentric" if is_concentric_up else "concentric"
+
+        logger.debug(f"{exercise_type} velocity: {mean_velocity:.3f} m/s ({direction})")
+        return mean_velocity, direction
 
     def calculate_fatigue_from_velocity(
         self,
@@ -861,7 +789,7 @@ class JointProcessor:
             # Try multiple windows from exercise start to find actual movement
             for offset in range(4):
                 t_start = exercise_start_time + offset * window_sec
-                initial_velocity = self.calculate_movement_velocity(
+                initial_velocity, _ = self.calculate_movement_velocity(
                     joint_data,
                     t_start,
                     t_start + window_sec * 2,
@@ -874,7 +802,7 @@ class JointProcessor:
             return 0.0
 
         # Calculate current velocity
-        current_velocity = self.calculate_movement_velocity(
+        current_velocity, _ = self.calculate_movement_velocity(
             joint_data,
             current_time - window_sec,
             current_time,
@@ -943,7 +871,7 @@ class JointProcessor:
         if time_span > 0:
             effective_fps = len(positions) / time_span
         else:
-            effective_fps = 15.0
+            effective_fps = 30.0
 
         # Minimum distance between reps (~1.5 seconds worth of detected frames)
         min_distance = max(3, int(effective_fps * 1.5))
@@ -973,7 +901,7 @@ class JointProcessor:
 
 class DataPreprocessor:
     """
-    Main data preprocessing pipeline combining all signal processors.
+    Main preprocessing pipeline: biosignals + joint ground truth.
     """
 
     def __init__(self, config=None):
@@ -981,509 +909,200 @@ class DataPreprocessor:
         self.signal_processor = SignalPreprocessor(config)
         self.joint_processor = JointProcessor(config)
 
-        # Clustering-based phase detector (lazy initialization)
-        self._phase_detector = None
-        self._phase_detector_initialized = False
-
-    def _get_phase_detector(self):
-        """Get or initialize the clustering-based phase detector."""
-        if self._phase_detector_initialized:
-            return self._phase_detector
-
-        # Check if clustering method is configured
-        if not hasattr(self.config, 'phase_detection') or \
-           self.config.phase_detection.method != 'clustering':
-            self._phase_detector_initialized = True
-            return None
-
-        from .phase_clustering import ClusteringPhaseDetector
-
-        # Try to load pre-trained model
-        if self.config.phase_detection.pretrained_model_path:
-            model_path = Path(self.config.phase_detection.pretrained_model_path)
-            if model_path.exists():
-                self._phase_detector = ClusteringPhaseDetector(
-                    n_clusters=self.config.phase_detection.n_clusters,
-                    use_dbscan=self.config.phase_detection.use_dbscan,
-                    smoothing_window=self.config.phase_detection.smoothing_window,
-                    velocity_threshold=self.config.phase_detection.velocity_threshold
-                )
-                self._phase_detector.load(model_path)
-                logger.info(f"Loaded clustering phase detector from {model_path}")
-                self._phase_detector_initialized = True
-                return self._phase_detector
-
-        # No pre-trained model - training model
-        self._phase_detector = ClusteringPhaseDetector(
-            n_clusters=self.config.phase_detection.n_clusters,
-            use_dbscan=self.config.phase_detection.use_dbscan,
-            smoothing_window=self.config.phase_detection.smoothing_window,
-            velocity_threshold=self.config.phase_detection.velocity_threshold
-        )
-        self._phase_detector_initialized = True
-        logger.debug("Initialized new clustering phase detector (not trained)")
-        return self._phase_detector
-
-    def detect_phase(
-        self,
-        joint_data: Dict,
-        start_time: float,
-        end_time: float,
-        exercise_type: str
-    ) -> str:
-        """
-        Detect phase using configured method (rule-based or clustering).
-
-        Args:
-            joint_data: Joint data dictionary
-            start_time: Window start time
-            end_time: Window end time
-            exercise_type: Type of exercise
-
-        Returns:
-            Phase label: 'eccentric', 'concentric', 'rest', or 'unknown'
-        """
-        # Check if we should use clustering
-        phase_detector = self._get_phase_detector()
-        logger.debug(f"Using phase detection method: {'clustering' if phase_detector else 'rule-based'}")
-
-        if phase_detector is not None and phase_detector.is_fitted:
-            # Use clustering-based detection
-            return phase_detector.predict_phase(
-                joint_data, start_time, end_time, exercise_type
-            )
-
-        # Fall back to rule-based detection
-        return self.joint_processor.detect_phase(
-            joint_data, start_time, end_time, exercise_type
-        )
-
-    def train_phase_detector(
-        self,
-        valid_sessions: List[Tuple[str, str, Path]]
-    ) -> bool:
-        """
-        Train the clustering-based phase detector on valid sessions.
-
-        Args:
-            valid_sessions: List of (exercise, session_id, path) tuples
-
-        Returns:
-            True if training successful, False otherwise
-        """
-        phase_detector = self._get_phase_detector()
-        if phase_detector is None:
-            logger.error("Phase detection not configured for clustering mode")
-            return False
-
-        if phase_detector.is_fitted:
-            logger.debug("Phase detector already trained")
-            return True
-
-        if not hasattr(self.config, 'phase_detection') or \
-           not self.config.phase_detection.auto_train:
-            logger.debug("Auto-training disabled for phase detector")
-            return False
-
-        logger.debug("Training clustering-based phase detector...")
-
-        all_features = []
-        window_sec = self.config.data.time_window_sec
-        window_stride = window_sec * (1 - self.config.data.overlap)
-
-        for exercise, session_id, session_path in valid_sessions:
-            # Load joint data
-            joint_path = session_path / self.config.data.joints_file
-            if not joint_path.exists():
-                logger.debug(f"Session {session_id} missing joint data, skipping")
-                continue
-
-            joint_data = self.joint_processor.load_joint_data(joint_path)
-            if not joint_data:
-                logger.debug(f"Session {session_id} has invalid joint data, skipping")
-                continue
-
-            frames = joint_data.get('frames', [])
-            if len(frames) < 2:
-                logger.debug(f"Session {session_id} has insufficient joint frames, skipping")
-                continue
-
-            # Get time range
-            first_ts = frames[0].get('timestamp_usec', 0)
-            last_ts = frames[-1].get('timestamp_usec', 0)
-            duration = (last_ts - first_ts) / 1e6
-
-            # Extract features for windows
-            n_windows = int((duration - window_sec) / window_stride) + 1
-
-            for i in range(n_windows):
-                start_time = i * window_stride
-                end_time = start_time + window_sec
-
-                features = phase_detector.extract_features(
-                    joint_data, start_time, end_time, exercise
-                )
-
-                if np.any(features):
-                    all_features.append(features)
-
-        if len(all_features) < phase_detector.n_clusters:
-            logger.warning(f"Not enough features for training: {len(all_features)}")
-            return False
-
-        all_features = np.array(all_features)
-        logger.debug(f"Extracted {len(all_features)} feature vectors from {len(valid_sessions)} sessions")
-        # Fit the detector
-        phase_detector.fit(all_features)
-
-        # Save if configured
-        if self.config.phase_detection.save_trained_model:
-            save_path = self.config.output.output_dir / "phase_detector.pkl"
-            phase_detector.save(save_path)
-
-        logger.debug("Phase detector training complete!")
-        return True
-
-    def preprocess_session(
-        self,
-        session_path: Path,
-        exercise_type: str
-    ) -> Dict[str, Any]:
-        """
-        Preprocess all data for a session.
-
-        Args:
-            session_path: Path to session folder
-            exercise_type: Type of exercise (Squat, Benchpress, Pullups, deadlift)
-
-        Returns:
-            Dictionary with preprocessed signals and metadata
-        """
+    def preprocess_session(self, session_path: Path, exercise_type: str) -> Dict[str, Any]:
         result = {
             'signals': {},
             'features': {},
             'markers': None,
             'joint_data': None,
             'windows': [],
-            'metadata': {
-                'session_path': str(session_path),
-                'exercise': exercise_type
-            }
+            'metadata': {'session_path': str(session_path), 'exercise': exercise_type}
         }
 
-        # Load and process markers
-        markers_path = session_path / self.config.data.markers_file
-        if markers_path.exists():
-            with open(markers_path, 'r') as f:
-                markers_data = json.load(f)
-            result['markers'] = markers_data
+        # Load markers
+        if (markers_path := session_path / self.config.data.markers_file).exists():
+            with open(markers_path) as f:
+                result['markers'] = json.load(f)
 
         # Load joint data
-        joint_path = session_path / self.config.data.joints_file
-        if joint_path.exists():
+        if (joint_path := session_path / self.config.data.joints_file).exists():
             result['joint_data'] = self.joint_processor.load_joint_data(joint_path)
 
-        # Process each signal type
-        for signal_name, signal_config in SIGNALS.items():
-            if not signal_config.enabled:
+        # Process biosignals
+        for name, cfg in SIGNALS.items():
+            if not cfg.enabled or cfg.file_name.endswith('.json'):
                 continue
 
-            if signal_config.file_name.endswith('.json'):
-                continue  # Joint data handled separately
-
-            signal_path = session_path / signal_config.file_name
-
-            if not signal_path.exists():
-                logger.debug(f"Session {session_path.name} missing {signal_name} data, skipping")
+            path = session_path / cfg.file_name
+            if not path.exists():
+                logger.debug(f"Missing {name} data in {session_path.name}")
                 continue
 
             try:
-                # Load signal
-                df = pd.read_csv(signal_path)
-                signal_data = df.iloc[:, 1].values  # Second column is signal value
-                time_data = df.iloc[:, 0].values  # First column is time
+                df = pd.read_csv(path)
+                time_data = df.iloc[:, 0].values
+                raw = df.iloc[:, 1].values
+                raw = np.nan_to_num(raw, nan=0.0)
 
-                # Handle NaN values
-                nan_mask = np.isnan(signal_data)
-                if nan_mask.any():
-                    signal_data = np.nan_to_num(signal_data, nan=0.0)
+                method = {
+                    'emg': self.signal_processor.preprocess_emg,
+                    'ecg': self.signal_processor.preprocess_ecg,
+                    'eda': self.signal_processor.preprocess_eda,
+                    'ppg': self.signal_processor.preprocess_ppg,
+                    'ppg_red': self.signal_processor.preprocess_ppg,
+                    'ppg_ir': self.signal_processor.preprocess_ppg,
+                    'ppg_green': self.signal_processor.preprocess_ppg,
+                    'ppg_blue': self.signal_processor.preprocess_ppg,
+                    'acc': self.signal_processor.preprocess_accelerometer,
+                }.get(name)
 
-                # Preprocess based on signal type
-                if signal_name == 'emg':
-                    processed, features = self.signal_processor.preprocess_emg(
-                        signal_data, signal_config.sampling_rate
-                    )
-                elif signal_name == 'ecg':
-                    processed, features = self.signal_processor.preprocess_ecg(
-                        signal_data, signal_config.sampling_rate
-                    )
-                elif signal_name == 'eda':
-                    processed, features = self.signal_processor.preprocess_eda(
-                        signal_data, signal_config.sampling_rate
-                    )
-                elif signal_name.startswith('ppg'):
-                    processed, features = self.signal_processor.preprocess_ppg(
-                        signal_data, signal_config.sampling_rate
-                    )
-                elif signal_name == 'acc':
-                    processed, features = self.signal_processor.preprocess_accelerometer(
-                        signal_data, signal_config.sampling_rate
-                    )
+                if method:
+                    processed, feats = method(raw, cfg.sampling_rate)
                 else:
-                    processed = signal_data
-                    features = {}
+                    processed, feats = raw, {}
 
-                # Ensure processed data has same length as time_data
+                # Normaliser lengde
+                expected = int(cfg.sampling_rate * (time_data[-1] - time_data[0] if len(time_data) > 1 else 0))
                 if len(processed) != len(time_data):
-                    # NeuroKit2 may return slightly different length, truncate/pad
-                    if len(processed) > len(time_data):
-                        processed = processed[:len(time_data)]
-                    elif len(processed) == 0:
-                        processed = np.zeros(len(time_data))
-                    else:
-                        processed = np.pad(processed, (0, len(time_data) - len(processed)), mode='edge')
+                    processed = self._normalize_length(processed, len(time_data))
 
-                result['signals'][signal_name] = {
-                    'data': processed,
-                    'time': time_data,
-                    'sampling_rate': signal_config.sampling_rate
-                }
-                result['features'][signal_name] = features
+                result['signals'][name] = {'data': processed, 'time': time_data, 'sampling_rate': cfg.sampling_rate}
+                result['features'][name] = feats
 
             except Exception as e:
-                print(f"Error processing {signal_name}: {e}")
+                logger.error(f"Failed processing {name}: {e}")
                 raise
 
         return result
 
-    def create_windows(
-        self,
-        session_data: Dict,
-        exercise_type: str
-    ) -> List[Dict]:
-        """
-        Create time-based windows from preprocessed session data.
+    @staticmethod
+    def _normalize_length(signal: np.ndarray, target_len: int) -> np.ndarray:
+        if len(signal) == target_len:
+            return signal
+        if len(signal) > target_len:
+            return signal[:target_len]
+        if len(signal) == 0:
+            return np.zeros(target_len)
+        return np.pad(signal, (0, target_len - len(signal)), mode='edge')
 
-        Args:
-            session_data: Output from preprocess_session
-            exercise_type: Type of exercise
-
-        Returns:
-            List of window dictionaries
-        """
+    def create_windows(self, session_data: Dict, exercise_type: str) -> List[Dict]:
         windows = []
-
-        markers = session_data.get('markers', {})
-        marker_list = markers.get('markers', [])
-
-        if not marker_list:
-            print("      No markers found")
+        if not (markers := session_data.get('markers', {})) or not (marker_list := markers.get('markers', [])):
+            logger.warning("No markers – skipping windows")
             return windows
 
-        # Check if any signals were loaded
         if not session_data.get('signals'):
-            print("      No signals loaded")
+            logger.warning("No signals – skipping")
             return windows
 
-        # Find start and end times
-        start_marker = next(
-            (m for m in marker_list if m.get('label', '').lower() == 'start'),
-            None
-        )
-
+        # Start/end fra markører
+        start_marker = next((m for m in marker_list if m.get('label', '').lower() == 'start'), None)
         if not start_marker:
-            print("      No 'start' marker found")
+            logger.warning("No 'start' marker – skipping")
             return windows
 
         start_time = start_marker.get('time', 0)
-        end_time = marker_list[-1].get('time', 0)
+        end_time = max(m.get('time', 0) for m in marker_list)
 
-        # Calculate window parameters
         window_sec = self.config.data.time_window_sec
-        overlap = self.config.data.overlap
-        step_sec = window_sec * (1 - overlap)
+        step_sec = window_sec * (1 - self.config.data.overlap)
 
-        # Pre-compute rep times from joint data (for per-window lookup)
+        # Cache joint stuff
         joint_rep_times = None
         initial_velocity = None
-        if session_data.get('joint_data'):
-            joint_rep_times = self.joint_processor.detect_rep_times(
-                session_data['joint_data'],
-                start_time,
-                end_time,
-                exercise_type
-            )
-            # Cache initial velocity once (avoid recomputing for every window)
+        if joint_data := session_data.get('joint_data'):
+            joint_rep_times = self.joint_processor.detect_rep_times(joint_data, start_time, end_time, exercise_type)
             for offset in range(4):
-                t_start = start_time + offset * window_sec
-                initial_velocity = self.joint_processor.calculate_movement_velocity(
-                    session_data['joint_data'],
-                    t_start,
-                    t_start + window_sec * 2,
-                    exercise_type
-                )
-                if initial_velocity > 0:
+                t = start_time + offset * window_sec
+                v, _ = self.joint_processor.calculate_movement_velocity(joint_data, t, t + window_sec * 2, exercise_type)
+                if v > 0.05:
+                    initial_velocity = v
                     break
 
-        # --- Biosignal fatigue: cache initial features from first window ---
-        initial_biosignal_features = {}
+        # Biosignal baseline
+        initial_bio_feats = {}
         sampling_rates = {}
-        use_biosignal_fatigue = False
+        use_bio_fatigue = False
 
-        for signal_name, signal_info in session_data['signals'].items():
-            signal_data = signal_info['data']
-            time_data = signal_info['time']
-            fs = signal_info['sampling_rate']
-            sampling_rates[signal_name] = fs
+        for name, info in session_data['signals'].items():
+            fs = info['sampling_rate']
+            sampling_rates[name] = fs
+            mask = (info['time'] >= start_time) & (info['time'] <= start_time + window_sec)
+            segment = info['data'][mask]
+            if len(segment) < 10:
+                continue
+            try:
+                if name == 'emg':
+                    _, feats = self.signal_processor.preprocess_emg(segment, fs)
+                elif name == 'ecg':
+                    _, feats = self.signal_processor.preprocess_ecg(segment, fs)
+                elif name.startswith('ppg'):
+                    _, feats = self.signal_processor.preprocess_ppg(segment, fs)
+                elif name == 'acc':
+                    _, feats = self.signal_processor.preprocess_accelerometer(segment, fs)
+                else:
+                    continue
+                initial_bio_feats[name] = feats
+                use_bio_fatigue = True
+            except Exception as e:
+                logger.debug(f"Initial {name} failed: {e}")
 
-            # Find first window's signal segment for baseline
-            mask = (time_data >= start_time) & (time_data <= start_time + window_sec)
-            first_window_signal = signal_data[mask]
-
-            if len(first_window_signal) > 0:
-                try:
-                    if signal_name == 'emg':
-                        _, features = self.signal_processor.preprocess_emg(first_window_signal, fs)
-                        initial_biosignal_features[signal_name] = features
-                        use_biosignal_fatigue = True
-                    elif signal_name == 'ecg':
-                        _, features = self.signal_processor.preprocess_ecg(first_window_signal, fs)
-                        initial_biosignal_features[signal_name] = features
-                        use_biosignal_fatigue = True
-                    elif signal_name.startswith('ppg'):
-                        _, features = self.signal_processor.preprocess_ppg(first_window_signal, fs)
-                        initial_biosignal_features[signal_name] = features
-                        use_biosignal_fatigue = True
-                    elif signal_name == 'acc':
-                        _, features = self.signal_processor.preprocess_accelerometer(first_window_signal, fs)
-                        initial_biosignal_features[signal_name] = features
-                        use_biosignal_fatigue = True
-                except Exception:
-                    pass  # Skip failed signal processing
-
-        # Generate windows
-        window_start = start_time
-        window_idx = 0
-
-        while window_start + window_sec <= end_time:
-            window_end = window_start + window_sec
-
-            window_data = {
-                'window_idx': window_idx,
-                'start_time': window_start,
-                'end_time': window_end,
+        # Generer vinduer
+        t = start_time
+        idx = 0
+        while t + window_sec <= end_time:
+            t_end = t + window_sec
+            window = {
+                'window_idx': idx,
+                'start_time': t,
+                'end_time': t_end,
                 'signals': {},
                 'joint_features': None,
-                'skeleton_frame': None,  # For visualization
+                'skeleton_frame': None,
                 'phase': 'unknown',
                 'rep_count': 0,
-                'fatigue_score': 0.0
+                'fatigue_score': 0.0,
+                'exercise': exercise_type
             }
 
-            # Extract signals for this window
-            for signal_name, signal_info in session_data['signals'].items():
-                signal_data = signal_info['data']
-                time_data = signal_info['time']
-                fs = signal_info['sampling_rate']
+            # Signaler
+            for name, info in session_data['signals'].items():
+                mask = (info['time'] >= t) & (info['time'] <= t_end)
+                sig = info['data'][mask]
+                expected = int(info['sampling_rate'] * window_sec)
+                if len(sig) == 0:
+                    sig = np.zeros(expected)
+                elif len(sig) < expected:
+                    sig = np.pad(sig, (0, expected - len(sig)), 'edge')
+                elif len(sig) > expected:
+                    sig = sig[:expected]
+                window['signals'][name] = sig
 
-                # Find indices for this time window
-                mask = (time_data >= window_start) & (time_data <= window_end)
-                window_signal = signal_data[mask]
+            # Reps
+            rep_markers = sum(1 for m in marker_list if t <= m.get('time', 0) <= t_end and m.get('label', '').lower() in ['rep', 'valley', 'completion'])
+            if rep_markers > 0:
+                window['rep_count'] = rep_markers
+            elif joint_rep_times:
+                window['rep_count'] = sum(t <= rt <= t_end for rt in joint_rep_times)
 
-                # Ensure correct length
-                expected_samples = int(fs * window_sec)
-                if len(window_signal) == 0:
-                    # Empty window - create zeros
-                    window_signal = np.zeros(expected_samples)
-                elif len(window_signal) < expected_samples:
-                    # Pad with edge values
-                    window_signal = np.pad(
-                        window_signal,
-                        (0, expected_samples - len(window_signal)),
-                        mode='edge'
-                    )
-                elif len(window_signal) > expected_samples:
-                    window_signal = window_signal[:expected_samples]
+            # Joint
+            if joint_data:
+                window['joint_features'] = self.joint_processor.extract_joint_features(joint_data, t, t_end, exercise_type)
+                window['skeleton_frame'] = self.joint_processor.get_skeleton_frame(joint_data, (t + t_end) / 2)
+                window['phase'] = self.joint_processor.detect_phase(joint_data, t, t_end, exercise_type)
 
-                window_data['signals'][signal_name] = window_signal
-
-            # GROUND TRUTH LABEL EXTRACTION
-            #
-            # Rep counting: per-window (0 or 1) for live prediction.
-            #   Primary: markers.json valley markers in [window_start, window_end]
-            #   Secondary: joint_data peak detection if no markers available
-            #
-            # Phase: from joint_data movement direction
-            # Fatigue: velocity degradation over time
-
-            # --- Rep count (per window) ---
-            # Primary: count marker valleys within this window
-            window_data['rep_count'] = sum(
-                1 for m in marker_list
-                if window_start <= m.get('time', 0) <= window_end
-                and m.get('label', '').lower() == 'valley'
-            )
-
-            # If no valley markers exist at all, fall back to joint peak detection
-            if not any(m.get('label', '').lower() == 'valley' for m in marker_list):
-                if joint_rep_times is not None:
-                    window_data['rep_count'] = sum(
-                        1 for t in joint_rep_times
-                        if window_start <= t <= window_end
-                    )
-
-            # --- Phase, joint features ---
-            if session_data.get('joint_data'):
-                window_data['joint_features'] = self.joint_processor.extract_joint_features(
-                    session_data['joint_data'],
-                    window_start,
-                    window_end,
-                    exercise_type
+            # Fatigue
+            if use_bio_fatigue and initial_bio_feats:
+                score, _ = self.signal_processor.calculate_biosignal_fatigue(window['signals'], initial_bio_feats, sampling_rates)
+                window['fatigue_score'] = score
+            elif joint_data:
+                window['fatigue_score'] = self.joint_processor.calculate_fatigue_from_velocity(
+                    joint_data, t_end, start_time, exercise_type, window_sec=t_end - t, initial_velocity=initial_velocity
                 )
 
-                window_mid_time = (window_start + window_end) / 2
-                window_data['skeleton_frame'] = self.joint_processor.get_skeleton_frame(
-                    session_data['joint_data'],
-                    window_mid_time
-                )
-
-                window_data['phase'] = self.detect_phase(
-                    session_data['joint_data'],
-                    window_start,
-                    window_end,
-                    exercise_type
-                )
-
-            # --- Fatigue calculation ---
-            # Priority: biosignal-based > velocity-based > time-based
-            if use_biosignal_fatigue and initial_biosignal_features:
-                # Calculate fatigue from EMG, ECG, PPG, ACC
-                fatigue_score, component_scores = self.signal_processor.calculate_biosignal_fatigue(
-                    window_data['signals'],
-                    initial_biosignal_features,
-                    sampling_rates
-                )
-                window_data['fatigue_score'] = fatigue_score
-                window_data['fatigue_components'] = component_scores
-            elif session_data.get('joint_data'):
-                # Fall back to velocity-based fatigue
-                window_data['fatigue_score'] = self.joint_processor.calculate_fatigue_from_velocity(
-                    session_data['joint_data'],
-                    window_end,
-                    start_time,
-                    exercise_type,
-                    window_sec,
-                    initial_velocity=initial_velocity
-                )
-            else:
-                # Time-based fatigue estimation (simple progress metric)
-                elapsed = end_time - start_time
-                window_data['fatigue_score'] = (window_start - start_time) / elapsed if elapsed > 0 else 0.0
-
-            windows.append(window_data)
-
-            window_start += step_sec
-            window_idx += 1
+            windows.append(window)
+            t += step_sec
+            idx += 1
 
         return windows
 
@@ -1511,22 +1130,18 @@ def preprocess_dataset(
 
     # If valid_sessions not provided, run validation to get them
     if valid_sessions is None:
-        from data.validate_data import DataValidator
+        from ml.v3.data.validate_data import DataValidator
         validator = DataValidator(dataset_path, config)
         validator.validate_all()
         valid_sessions = validator.get_valid_sessions()
 
     if not valid_sessions:
-        print("No valid sessions found!")
+        logger.warning("No valid sessions found!")
         return []
 
-    print(f"\nProcessing {len(valid_sessions)} valid sessions...")
+    logger.info(f"Processing {len(valid_sessions)} valid sessions...")
 
     preprocessor = DataPreprocessor(config)
-
-    # Train clustering phase detector if configured
-    if hasattr(config, 'phase_detection') and config.phase_detection.method == 'clustering':
-        preprocessor.train_phase_detector(valid_sessions)
 
     all_windows = []
 
@@ -1538,10 +1153,10 @@ def preprocess_dataset(
         sessions_by_exercise[exercise].append((session_id, path))
 
     for exercise, sessions in sessions_by_exercise.items():
-        print(f"\n  {exercise}: {len(sessions)} sessions")
+        logger.info(f"{exercise}: {len(sessions)} sessions")
 
         for session_id, session_path in sessions:
-            print(f"    Processing {exercise}/{session_id}...")
+            logger.info(f"Processing {exercise}/{session_id}...")
 
             try:
                 # Preprocess session
@@ -1556,11 +1171,11 @@ def preprocess_dataset(
                     window['session_id'] = session_id
 
                 all_windows.extend(windows)
-                print(f"      -> {len(windows)} windows created")
+                logger.info(f"  -> {len(windows)} windows created")
 
             except Exception as e:
-                print(f"      [ERROR] Failed to process: {e}")
+                logger.error(f"Failed to process {exercise}/{session_id}: {e}")
                 continue
 
-    print(f"\nTotal windows created: {len(all_windows)}")
+    logger.info(f"Total windows created: {len(all_windows)}")
     return all_windows

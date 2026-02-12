@@ -56,7 +56,7 @@ class ModelEvaluator:
 
         self.exercise_names = self.config.get_active_exercises() if hasattr(self.config, 'get_active_exercises') \
             else self.config.data.exercises
-        self.phase_names = ['Eccentric', 'Concentric']
+        self.phase_names = ['Rest', 'Eccentric', 'Concentric']
 
     @torch.no_grad()
     def evaluate(self, data_loader: DataLoader) -> Dict[str, Any]:
@@ -78,9 +78,9 @@ class ModelEvaluator:
             phase_true.extend(targets['phase'].cpu().numpy())
             phase_pred.extend(phase_preds.cpu().numpy())
             rep_true.extend(targets['reps'].cpu().numpy())
-            rep_pred.extend(rep_output.squeeze().cpu().numpy())
+            rep_pred.extend(rep_output.squeeze(-1).cpu().numpy())
             fatigue_true.extend(targets['fatigue'].cpu().numpy())
-            fatigue_pred.extend(fatigue_output.squeeze().cpu().numpy())
+            fatigue_pred.extend(fatigue_output.squeeze(-1).cpu().numpy())
 
         results = {
             'predictions': {
@@ -405,7 +405,7 @@ class PlotGenerator:
         )
         self.plot_confusion_matrix(
             results['phase_metrics']['confusion_matrix'],
-            ['Eccentric', 'Concentric'],
+            ['Rest', 'Eccentric', 'Concentric'],
             'Phase Detection Confusion Matrix',
             output_dir / 'phase_confusion_matrix.png'
         )

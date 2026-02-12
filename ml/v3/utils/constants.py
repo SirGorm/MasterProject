@@ -5,6 +5,10 @@ This module contains constants used across multiple modules to avoid duplication
 """
 
 from typing import Dict, List
+from ml.v3.utils.logging_utils import get_logger, setup_logging
+# Set up logging
+logger = get_logger('constants')
+
 
 # Azure Kinect joint names (32 joints)
 JOINT_NAMES: List[str] = [
@@ -21,72 +25,63 @@ JOINT_NAMES: List[str] = [
 # Joint name to index mapping
 JOINT_TO_IDX: Dict[str, int] = {name: i for i, name in enumerate(JOINT_NAMES)}
 
-# Exercise-specific joint indices for tracking (simple mapping)
-# Maps exercise name to primary joint index for phase/rep detection
-EXERCISE_JOINT_IDX: Dict[str, int] = {
-    'squat': 0,       # PELVIS
-    'deadlift': 2,    # SPINE_CHEST
-    'benchpress': 7,  # WRIST_LEFT
-    'pullup': 2,      # SPINE_CHEST
-    'pullups': 2,     # SPINE_CHEST
-}
-
-# Exercise-specific phase configuration for rule-based detection
-# y_decrease: phase when Y decreases, y_increase: phase when Y increases
-EXERCISE_PHASE_CONFIG: Dict[str, Dict] = {
-    'squat': {
-        'joint_idx': 0,  # PELVIS
-        'y_decrease': 'eccentric',   # Going down
-        'y_increase': 'concentric',  # Standing up
+EXERCISE_CONFIG: Dict[str, Dict] = {
+    "squat": {
+        "primary_joint": "PELVIS",
+        "assist_joints": ["HIP_LEFT", "SPINE_CHEST"],
+        "validation_joints": ["HIP_RIGHT", "SPINE_NAVEL"],
+        "direction": {
+            "y_decrease": "eccentric",   # ned = excentrisk
+            "y_increase": "concentric",  # opp = concentrisk
+        },
+        "min_agreement": 0.6,
     },
-    'benchpress': {
-        'joint_idx': 7,  # WRIST_LEFT
-        'y_decrease': 'eccentric',   # Bar going down
-        'y_increase': 'concentric',  # Pressing up
+    "benchpress": {
+        "primary_joint": "WRIST_RIGHT",  
+        "assist_joints": ["SHOULDER_RIGHT", "ELBOW_RIGHT"],
+        "validation_joints": ["WRIST_LEFT", "ELBOW_LEFT", "SHOULDER_LEFT"],
+        "direction": {
+            "y_decrease": "eccentric",
+            "y_increase": "concentric",
+        },
+        "min_agreement": 0.65,
     },
-    'deadlift': {
-        'joint_idx': 2,  # SPINE_CHEST
-        'y_decrease': 'concentric',  # Standing up with bar
-        'y_increase': 'eccentric',   # Lowering bar
+    "deadlift": {
+        "primary_joint": "SPINE_CHEST",
+        "assist_joints": ["PELVIS", "SPINE_NAVEL", "HIP_LEFT", "SHOULDER_LEFT"],
+        "validation_joints": ["HIP_RIGHT", "HIP_LEFT", "SHOULDER_RIGHT"],
+        "direction": {
+            "y_decrease": "concentric",   # opp = concentric
+            "y_increase": "eccentric",    # ned = eccentric
+        },
+        "min_agreement": 0.7,
     },
-    'pullup': {
-        'joint_idx': 2,  # SPINE_CHEST
-        'y_decrease': 'concentric',  # Pulling up
-        'y_increase': 'eccentric',   # Going down
-    },
-    'pullups': {
-        'joint_idx': 2,  # SPINE_CHEST
-        'y_decrease': 'concentric',  # Pulling up
-        'y_increase': 'eccentric',   # Going down
-    },
-}
-
-# Exercise joints for clustering-based phase detection (detailed)
-# Primary joints: main joints for movement detection
-# Secondary joints: supporting joints for context
-EXERCISE_JOINTS_DETAILED: Dict[str, Dict[str, List[str]]] = {
-    'squat': {
-        'primary': ['KNEE_RIGHT', 'KNEE_LEFT', 'HIP_RIGHT', 'HIP_LEFT'],
-        'secondary': ['ANKLE_RIGHT', 'ANKLE_LEFT', 'PELVIS']
-    },
-    'deadlift': {
-        'primary': ['HIP_RIGHT', 'HIP_LEFT', 'KNEE_RIGHT', 'KNEE_LEFT'],
-        'secondary': ['PELVIS', 'SPINE_CHEST']
-    },
-    'benchpress': {
-        'primary': ['ELBOW_RIGHT', 'ELBOW_LEFT', 'SHOULDER_RIGHT', 'SHOULDER_LEFT'],
-        'secondary': ['WRIST_RIGHT', 'WRIST_LEFT', 'SPINE_CHEST']
-    },
-    'pullup': {
-        'primary': ['ELBOW_RIGHT', 'ELBOW_LEFT', 'SHOULDER_RIGHT', 'SHOULDER_LEFT'],
-        'secondary': ['WRIST_RIGHT', 'WRIST_LEFT', 'SPINE_NAVEL', 'SPINE_CHEST']
-    },
-    'pullups': {
-        'primary': ['ELBOW_RIGHT', 'ELBOW_LEFT', 'SHOULDER_RIGHT', 'SHOULDER_LEFT'],
-        'secondary': ['WRIST_RIGHT', 'WRIST_LEFT', 'SPINE_NAVEL', 'SPINE_CHEST']
+    "pullup": {
+        "primary_joint": "SPINE_CHEST",
+        "assist_joints": ["PELVIS", "SPINE_NAVEL", "SHOULDER_LEFT", "SHOULDER_RIGHT"],
+        "validation_joints": ["HIP_RIGHT", "HIP_LEFT", "NECK"],
+        "direction": {
+            "y_decrease": "concentric",   # opp = concentric
+            "y_increase": "eccentric",    # ned = eccentric
+        },
+        "min_agreement": 0.7,
     },
 }
 
+
+for cfg in EXERCISE_CONFIG.values():
+    cfg["primary_idx"] = JOINT_TO_IDX[cfg["primary_joint"]]
+    
+    # all_idx = primary + assist 
+    cfg["all_idx"] = [
+        JOINT_TO_IDX[cfg["primary_joint"]],
+        *[JOINT_TO_IDX[j] for j in cfg.get("assist_joints", [])]
+    ]
+    
+    #
+    cfg["validation_idx"] = [
+        JOINT_TO_IDX[j] for j in cfg.get("validation_joints", [])
+    ]
 # Bone connections for skeleton visualization (Azure Kinect)
 BONE_CONNECTIONS: List[tuple] = [
     # Spine
@@ -126,23 +121,45 @@ REST_VELOCITY_THRESHOLD: float = 0.02
 
 
 def get_exercise_joint_index(exercise_type: str) -> int:
-    """Get primary joint index for an exercise (case-insensitive)."""
-    return EXERCISE_JOINT_IDX.get(exercise_type.lower(), 0)
+    """
+    Returnerer PRIMARY joint index for one excercies
+    """
+    if not exercise_type:
+        return 0  # fallback / feilhåndtering
+    
+    key = exercise_type.lower().strip()
+    
+    if key not in EXERCISE_CONFIG:
+        raise ValueError(f"Ukjent øvelse: {exercise_type}. Kjente: {list(EXERCISE_CONFIG.keys())}")
+    
+    return EXERCISE_CONFIG[key]["primary_idx"]
+
+
+def get_exercise_all_joint_index(exercise_type: str) -> List[int]:
+    """Returnerer list with primary + assist joint indices."""
+    key = exercise_type.lower().strip()
+    if key not in EXERCISE_CONFIG:
+        raise ValueError(f"Unknown Excercie: {exercise_type}")
+    
+    return EXERCISE_CONFIG[key]["all_idx"]
 
 
 def get_exercise_phase_config(exercise_type: str) -> Dict:
     """Get phase configuration for an exercise (case-insensitive)."""
-    config = EXERCISE_PHASE_CONFIG.get(exercise_type.lower())
+    config = EXERCISE_CONFIG.get(exercise_type.lower())
     if config is None:
-        # Default to squat-like behavior
-        config = EXERCISE_PHASE_CONFIG['squat']
+        logger.warning(f"Exercise type '{exercise_type}' not found in phase config. Defaulting to squat config.")
     return config
 
 
 def get_exercise_joints(exercise_type: str) -> Dict[str, List[str]]:
     """Get detailed joint configuration for an exercise (case-insensitive)."""
-    joints = EXERCISE_JOINTS_DETAILED.get(exercise_type.lower())
+    joints = EXERCISE_CONFIG.get(exercise_type.lower())
     if joints is None:
-        # Default to squat joints
-        joints = EXERCISE_JOINTS_DETAILED['squat']
+        logger.warning(f"Exercise type '{exercise_type}' not found in detailed joint config. Defaulting to squat config.")
     return joints
+
+# Bare for manuell testing 
+if __name__ == "__main__":
+    print("Testing constants module directly")
+    print("Primary joint index for squat:", get_exercise_all_joint_index("deadlift"))
